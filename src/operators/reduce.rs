@@ -19,7 +19,7 @@ use timely::dataflow::operators::Capability;
 
 use operators::arrange::{Arranged, ArrangeByKey, ArrangeBySelf, TraceAgent};
 use lattice::Lattice;
-use trace::{Batch, BatchReader, Cursor, Trace, Builder};
+use trace::{Batch, BatchReader, Cursor, Trace, Builder, ExertionLogic};
 use trace::cursor::CursorList;
 use trace::implementations::ord::OrdValSpine as DefaultValTrace;
 use trace::implementations::ord::OrdKeySpine as DefaultKeyTrace;
@@ -351,17 +351,14 @@ where
                     register.get::<::logging::DifferentialEvent>("differential/arrange")
                 };
 
-                // Determine if we should regularly exert the trace maintenance machinery,
-                // and with what amount of effort each time.
-                let (activator, effort) =
-                if let Some(effort) = self.stream.scope().config().get::<isize>("differential/idle_merge_effort").cloned() {
-                    (Some(self.stream.scope().activator_for(&operator_info.address[..])), Some(effort))
+                let activator = Some(self.stream.scope().activator_for(&operator_info.address[..]));
+                let mut empty = T2::new(operator_info.clone(), logger.clone(), activator);
+                // If there is default exert logic set, install it.
+                if let Some(exert_logic) = self.stream.scope().config().get::<ExertionLogic>("differential/default_exert_logic").cloned() {
+                    empty.set_exert_logic(exert_logic);
                 }
-                else {
-                    (None, None)
-                };
 
-                let empty = T2::new(operator_info.clone(), logger.clone(), activator);
+
                 let mut source_trace = self.trace.clone();
 
                 let (mut output_reader, mut output_writer) = TraceAgent::new(empty, operator_info, logger);
@@ -498,8 +495,8 @@ where
                             while batch_cursor.key_valid(batch_storage) || exposed_position < exposed.len() {
 
                                 // Determine the next key we will work on; could be synthetic, could be from a batch.
-                                let key1 = exposed.get(exposed_position).map(|x| x.0.clone());
-                                let key2 = batch_cursor.get_key(&batch_storage).map(|k| k.clone());
+                                let key1 = exposed.get(exposed_position).map(|x| &x.0);
+                                let key2 = batch_cursor.get_key(&batch_storage);
                                 let key = match (key1, key2) {
                                     (Some(key1), Some(key2)) => ::std::cmp::min(key1, key2),
                                     (Some(key1), None)       => key1,
@@ -514,7 +511,7 @@ where
                                 interesting_times.clear();
 
                                 // Populate `interesting_times` with synthetic interesting times (below `upper_limit`) for this key.
-                                while exposed.get(exposed_position).map(|x| &x.0) == Some(&key) {
+                                while exposed.get(exposed_position).map(|x| &x.0) == Some(key) {
                                     interesting_times.push(exposed[exposed_position].1.clone());
                                     exposed_position += 1;
                                 }
@@ -524,7 +521,7 @@ where
 
                                 // do the per-key computation.
                                 let _counters = thinker.compute(
-                                    &key,
+                                    key,
                                     (&mut source_cursor, source_storage),
                                     (&mut output_cursor, output_storage),
                                     (&mut batch_cursor, batch_storage),
@@ -535,7 +532,7 @@ where
                                     &mut new_interesting_times,
                                 );
 
-                                if batch_cursor.get_key(batch_storage) == Some(&key) {
+                                if batch_cursor.get_key(batch_storage) == Some(key) {
                                     batch_cursor.step_key(batch_storage);
                                 }
 
@@ -629,9 +626,7 @@ where
                     }
 
                     // Exert trace maintenance if we have been so requested.
-                    if let Some(mut fuel) = effort.clone() {
-                        output_writer.exert(&mut fuel);
-                    }
+                    output_writer.exert();
                 }
             }
         )
