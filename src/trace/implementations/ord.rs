@@ -16,7 +16,7 @@ use timely::progress::{Antichain, frontier::AntichainRef};
 
 use lattice::Lattice;
 
-use trace::layers::{Trie, TupleBuilder, BatchContainer};
+use trace::layers::{Trie, TupleBuilder};
 use trace::layers::Builder as TrieBuilder;
 use trace::layers::Cursor as TrieCursor;
 use trace::layers::ordered::{OrderedLayer, OrderedBuilder, OrderedCursor};
@@ -32,7 +32,7 @@ use super::merge_batcher::MergeBatcher;
 
 use abomonation::abomonated::Abomonated;
 use trace::implementations::merge_batcher_col::ColumnatedMergeBatcher;
-use trace::implementations::RetainFrom;
+use trace::implementations::{BatchContainer, RetainFrom};
 
 use super::{Update, Layout, Vector, TStack};
 
@@ -353,14 +353,9 @@ where
     type Time = <L::Target as Update>::Time;
     type Output = OrdValBatch<L>;
 
-    fn new() -> Self {
+    fn with_capacity(_keys: usize, _vals: usize, upds: usize) -> Self {
         OrdValBuilder {
-            builder: <KVTDBuilder<L>>::new(),
-        }
-    }
-    fn with_capacity(cap: usize) -> Self {
-        OrdValBuilder {
-            builder: <KVTDBuilder<L> as TupleBuilder>::with_capacity(cap),
+            builder: <KVTDBuilder<L> as TupleBuilder>::with_capacity(upds),
         }
     }
 
@@ -628,15 +623,9 @@ where
     type Time = <L::Target as Update>::Time;
     type Output = OrdKeyBatch<L>;
 
-    fn new() -> Self {
+    fn with_capacity(_keys: usize, _vals: usize, upds: usize) -> Self {
         OrdKeyBuilder {
-            builder: <KTDBuilder<L>>::new(),
-        }
-    }
-
-    fn with_capacity(cap: usize) -> Self {
-        OrdKeyBuilder {
-            builder: <KTDBuilder<L> as TupleBuilder>::with_capacity(cap),
+            builder: <KTDBuilder<L> as TupleBuilder>::with_capacity(upds),
         }
     }
 

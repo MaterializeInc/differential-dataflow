@@ -66,10 +66,35 @@ where
     #[inline]
     fn seal<B: Builder<Item=Self::Item, Time=Self::Time>>(&mut self, upper: Antichain<U::Time>) -> B::Output {
 
-        let mut builder = B::new();
-
         let mut merged = Default::default();
         self.sorter.finish_into(&mut merged);
+
+        // Determine the number of distinct keys, values, and updates,
+        // and form a builder pre-sized for these numbers.
+        let mut builder = {
+            let mut keys = 0;
+            let mut vals = 0;
+            let mut upds = 0;
+            let mut prev_keyval = None;
+            for buffer in merged.iter() {
+                for ((key, val), time, _) in buffer.iter() {
+                    if !upper.less_equal(time) {
+                        if let Some((p_key, p_val)) = prev_keyval {
+                            if p_key != key {
+                                keys += 1;
+                                vals += 1;
+                            }
+                            else if p_val != val {
+                                vals += 1;
+                            }
+                            upds += 1;
+                        }
+                        prev_keyval = Some((key, val));
+                    }
+                }
+            }
+            B::with_capacity(keys, vals, upds)
+        };
 
         let mut kept = Vec::new();
         let mut keep = TimelyStack::default();
@@ -80,7 +105,11 @@ where
             for datum @ ((_key, _val), time, _diff) in &buffer[..] {
                 if upper.less_equal(time) {
                     self.frontier.insert(time.clone());
-                    if !keep.is_empty() && keep.len() == keep.capacity() {
+                    if keep.is_empty() {
+                        if keep.capacity() != MergeSorterColumnation::<(U::Key, U::Val), U::Time, U::Diff>::buffer_size() {
+                            keep = self.sorter.empty();
+                        }
+                    } else if keep.len() == keep.capacity() {
                         kept.push(keep);
                         keep = self.sorter.empty();
                     }
@@ -203,7 +232,7 @@ impl<D: Ord+Clone+Columnation+'static, T: Ord+Clone+Columnation+'static, R: Semi
 
     /// Insert an empty buffer into the stash. Panics if the buffer is not empty.
     fn recycle(&mut self, mut buffer: TimelyStack<(D, T, R)>) {
-        if buffer.capacity() == Self::buffer_size() && self.stash.len() <= 2 {
+        if buffer.capacity() == Self::buffer_size() && self.stash.len() < 2 {
             buffer.clear();
             self.stash.push(buffer);
         }
