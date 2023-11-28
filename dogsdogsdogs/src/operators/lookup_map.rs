@@ -30,15 +30,15 @@ where
     G: Scope,
     G::Timestamp: Lattice,
     Tr: TraceReader<Time=G::Timestamp>+Clone+'static,
-    Tr::Key: Ord+Hashable,
+    Tr::Key: Ord+Hashable+Sized,
     Tr::Val: Clone,
-    Tr::R: Monoid+ExchangeData,
+    Tr::Diff: Monoid+ExchangeData,
     F: FnMut(&D, &mut Tr::Key)+Clone+'static,
     D: ExchangeData,
     R: ExchangeData+Monoid,
     DOut: Clone+'static,
     ROut: Monoid,
-    S: FnMut(&D, &R, &Tr::Val, &Tr::R)->(DOut, ROut)+'static,
+    S: FnMut(&D, &R, &Tr::Val, &Tr::Diff)->(DOut, ROut)+'static,
 {
     // No need to block physical merging for this operator.
     arrangement.trace.set_physical_compaction(Antichain::new().borrow());
@@ -99,7 +99,7 @@ where
                             cursor.seek_key(&storage, &key1);
                             if cursor.get_key(&storage) == Some(&key1) {
                                 while let Some(value) = cursor.get_val(&storage) {
-                                    let mut count = Tr::R::zero();
+                                    let mut count = Tr::Diff::zero();
                                     cursor.map_times(&storage, |t, d| {
                                         if t.less_equal(time) { count.plus_equals(d); }
                                     });

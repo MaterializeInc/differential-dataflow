@@ -42,41 +42,41 @@ use trace::abomonated_blanket_impls::AbomonatedBuilder;
 /// A trace implementation using a spine of ordered lists.
 pub type OrdValSpine<K, V, T, R, O=usize> = Spine<
     Rc<OrdValBatch<Vector<((K,V),T,R), O>>>,
-    MergeBatcher<((K,V),T,R)>,
+    MergeBatcher<K,V,T,R>,
     RcBuilder<OrdValBuilder<Vector<((K,V),T,R), O>>>,
 >;
 
 /// A trace implementation using a spine of abomonated ordered lists.
 pub type OrdValSpineAbom<K, V, T, R, O=usize> = Spine<
     Rc<Abomonated<OrdValBatch<Vector<((K,V),T,R), O>>, Vec<u8>>>,
-    MergeBatcher<((K,V),T,R)>,
+    MergeBatcher<K,V,T,R>,
     AbomonatedBuilder<OrdValBuilder<Vector<((K,V),T,R), O>>>,
 >;
 
 /// A trace implementation for empty values using a spine of ordered lists.
 pub type OrdKeySpine<K, T, R, O=usize> = Spine<
     Rc<OrdKeyBatch<Vector<((K,()),T,R), O>>>,
-    MergeBatcher<((K,()),T,R)>,
+    MergeBatcher<K,(),T,R>,
     RcBuilder<OrdKeyBuilder<Vector<((K,()),T,R), O>>>,
 >;
 
 /// A trace implementation for empty values using a spine of abomonated ordered lists.
 pub type OrdKeySpineAbom<K, T, R, O=usize> = Spine<
     Rc<Abomonated<OrdKeyBatch<Vector<((K,()),T,R), O>>, Vec<u8>>>,
-    MergeBatcher<((K,()),T,R)>,
+    MergeBatcher<K,(),T,R>,
     AbomonatedBuilder<OrdKeyBuilder<Vector<((K,()),T,R), O>>>,
 >;
 
 /// A trace implementation backed by columnar storage.
 pub type ColValSpine<K, V, T, R, O=usize> = Spine<
     Rc<OrdValBatch<TStack<((K,V),T,R), O>>>,
-    ColumnatedMergeBatcher<((K,V),T,R)>,
+    ColumnatedMergeBatcher<K,V,T,R>,
     RcBuilder<OrdValBuilder<TStack<((K,V),T,R), O>>>,
 >;
 /// A trace implementation backed by columnar storage.
 pub type ColKeySpine<K, T, R, O=usize> = Spine<
     Rc<OrdKeyBatch<TStack<((K,()),T,R), O>>>,
-    ColumnatedMergeBatcher<((K,()),T,R)>,
+    ColumnatedMergeBatcher<K,(),T,R>,
     RcBuilder<OrdKeyBuilder<TStack<((K,()),T,R), O>>>,
 >;
 
@@ -114,7 +114,7 @@ where
     type Key = <L::Target as Update>::Key;
     type Val = <L::Target as Update>::Val;
     type Time = <L::Target as Update>::Time;
-    type R = <L::Target as Update>::Diff;
+    type Diff = <L::Target as Update>::Diff;
 
     type Cursor = OrdValCursor<L>;
     fn cursor(&self) -> Self::Cursor { OrdValCursor { cursor: self.layer.cursor(), phantom: std::marker::PhantomData } }
@@ -337,7 +337,7 @@ where
     cursor: OrderedCursor<VTDLayer<L>>,
 }
 
-impl<L: Layout> Cursor<OrdValBatch<L>> for OrdValCursor<L>
+impl<L: Layout> Cursor for OrdValCursor<L>
 where
     <L::Target as Update>::Key: Sized + Clone,
     <L::Target as Update>::Val: Sized + Clone,
@@ -345,13 +345,13 @@ where
     type Key = <L::Target as Update>::Key;
     type Val = <L::Target as Update>::Val;
     type Time = <L::Target as Update>::Time;
-    type R = <L::Target as Update>::Diff;
+    type Diff = <L::Target as Update>::Diff;
 
-    // type Storage = OrdValBatch<L>;
+    type Storage = OrdValBatch<L>;
 
     fn key<'a>(&self, storage: &'a OrdValBatch<L>) -> &'a Self::Key { &self.cursor.key(&storage.layer) }
     fn val<'a>(&self, storage: &'a OrdValBatch<L>) -> &'a Self::Val { &self.cursor.child.key(&storage.layer.vals) }
-    fn map_times<L2: FnMut(&Self::Time, &Self::R)>(&mut self, storage: &OrdValBatch<L>, mut logic: L2) {
+    fn map_times<L2: FnMut(&Self::Time, &Self::Diff)>(&mut self, storage: &OrdValBatch<L>, mut logic: L2) {
         self.cursor.child.child.rewind(&storage.layer.vals.vals);
         while self.cursor.child.child.valid(&storage.layer.vals.vals) {
             logic(&self.cursor.child.child.key(&storage.layer.vals.vals).0, &self.cursor.child.child.key(&storage.layer.vals.vals).1);
@@ -382,7 +382,7 @@ impl<L: Layout> Builder for OrdValBuilder<L>
 where
     <L::Target as Update>::Key: Sized + Clone,
     <L::Target as Update>::Val: Sized + Clone,
-    OrdValBatch<L>: Batch<Key=<L::Target as Update>::Key, Val=<L::Target as Update>::Val, Time=<L::Target as Update>::Time, R=<L::Target as Update>::Diff>
+    OrdValBatch<L>: Batch<Key=<L::Target as Update>::Key, Val=<L::Target as Update>::Val, Time=<L::Target as Update>::Time, Diff=<L::Target as Update>::Diff>
 {
     type Item = ((<L::Target as Update>::Key, <L::Target as Update>::Val), <L::Target as Update>::Time, <L::Target as Update>::Diff);
     type Time = <L::Target as Update>::Time;
@@ -434,7 +434,7 @@ where
     type Key = <L::Target as Update>::Key;
     type Val = ();
     type Time = <L::Target as Update>::Time;
-    type R = <L::Target as Update>::Diff;
+    type Diff = <L::Target as Update>::Diff;
 
     type Cursor = OrdKeyCursor<L>;
     fn cursor(&self) -> Self::Cursor {
@@ -636,18 +636,20 @@ pub struct OrdKeyCursor<L: Layout> {
     cursor: OrderedCursor<OrderedLeaf<<L::Target as Update>::Time, <L::Target as Update>::Diff>>,
 }
 
-impl<L: Layout> Cursor<OrdKeyBatch<L>> for OrdKeyCursor<L>
+impl<L: Layout> Cursor for OrdKeyCursor<L>
 where
     <L::Target as Update>::Key: Sized,
 {
     type Key = <L::Target as Update>::Key;
     type Val = ();
     type Time = <L::Target as Update>::Time;
-    type R = <L::Target as Update>::Diff;
+    type Diff = <L::Target as Update>::Diff;
+
+    type Storage = OrdKeyBatch<L>;
 
     fn key<'a>(&self, storage: &'a OrdKeyBatch<L>) -> &'a Self::Key { &self.cursor.key(&storage.layer) }
     fn val<'a>(&self, _storage: &'a OrdKeyBatch<L>) -> &'a () { &() }
-    fn map_times<L2: FnMut(&Self::Time, &Self::R)>(&mut self, storage: &OrdKeyBatch<L>, mut logic: L2) {
+    fn map_times<L2: FnMut(&Self::Time, &Self::Diff)>(&mut self, storage: &OrdKeyBatch<L>, mut logic: L2) {
         self.cursor.child.rewind(&storage.layer.vals);
         while self.cursor.child.valid(&storage.layer.vals) {
             logic(&self.cursor.child.key(&storage.layer.vals).0, &self.cursor.child.key(&storage.layer.vals).1);
@@ -676,7 +678,7 @@ where
 impl<L: Layout> Builder for OrdKeyBuilder<L>
 where
     <L::Target as Update>::Key: Sized + Clone,
-    OrdKeyBatch<L>: Batch<Key=<L::Target as Update>::Key, Val=(), Time=<L::Target as Update>::Time, R=<L::Target as Update>::Diff>
+    OrdKeyBatch<L>: Batch<Key=<L::Target as Update>::Key, Val=(), Time=<L::Target as Update>::Time, Diff=<L::Target as Update>::Diff>
 {
     type Item = ((<L::Target as Update>::Key, ()), <L::Target as Update>::Time, <L::Target as Update>::Diff);
     type Time = <L::Target as Update>::Time;
