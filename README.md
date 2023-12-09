@@ -1,4 +1,16 @@
 # Differential Dataflow
+
+> **Warning**
+>
+> Do **not** merge material changes to this fork. The occasional dependency bump
+> is acceptable, but all material changes must be submitted, reviewed and merged
+> upstream: <https://github.com/TimelyDataflow/differential-dataflow>
+>
+> This fork exists solely because:
+>   * we have an organizational ban on Git dependencies outside of the
+>     MaterializeInc GitHub organization; and
+>   * the upstream project does not regularly release to crates.io.
+
 An implementation of [differential dataflow](https://github.com/timelydataflow/differential-dataflow/blob/master/differentialdataflow.pdf) over [timely dataflow](https://github.com/timelydataflow/timely-dataflow) on [Rust](http://www.rust-lang.org).
 
 ## Background
