@@ -55,6 +55,7 @@
 //! will often be a logic bug, as `since` does not advance without a corresponding advance in
 //! times at which data may possibly be sent.
 
+use abomonation_derive::Abomonation;
 use timely::{PartialOrder, progress::Antichain};
 use serde::{Serialize, Deserialize};
 
@@ -78,7 +79,7 @@ pub struct Description<Time> {
 impl<Time: PartialOrder+Clone> Description<Time> {
     /// Returns a new description from its component parts.
     pub fn new(lower: Antichain<Time>, upper: Antichain<Time>, since: Antichain<Time>) -> Self {
-        assert!(lower.elements().len() > 0);    // this should always be true.
+        assert!(!lower.elements().is_empty());    // this should always be true.
         // assert!(upper.len() > 0);            // this may not always be true.
         Description {
             lower,

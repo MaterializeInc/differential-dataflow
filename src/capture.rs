@@ -10,6 +10,8 @@
 //! this file.
 
 use std::time::Duration;
+use abomonation_derive::Abomonation;
+use serde::{Deserialize, Serialize};
 
 /// A message in the CDC V2 protocol.
 #[derive(Ord, PartialOrd, Eq, PartialEq, Debug, Clone, Serialize, Deserialize, Abomonation)]
@@ -394,7 +396,7 @@ pub mod source {
                     let mut progress_session = progress.session(&progress_caps[0]);
 
                     // We presume the iterator will yield if appropriate.
-                    while let Some(message) = source.next() {
+                    for message in source.by_ref() {
                         match message {
                             Message::Updates(mut updates) => {
                                 updates_session.give_vec(&mut updates);
@@ -622,7 +624,7 @@ pub mod sink {
         // and so any record we see is in fact guaranteed to happen.
         let mut builder = OperatorBuilder::new("UpdatesWriter".to_owned(), stream.scope());
         let reactivator = stream.scope().activator_for(&builder.operator_info().address);
-        let mut input = builder.new_input(&stream, Pipeline);
+        let mut input = builder.new_input(stream, Pipeline);
         let (mut updates_out, updates) = builder.new_output();
 
         builder.build_reschedule(
@@ -653,7 +655,7 @@ pub mod sink {
                     if let Some(sink) = updates_sink.upgrade() {
                         let mut sink = sink.borrow_mut();
                         while let Some(message) = send_queue.front() {
-                            if let Some(duration) = sink.poll(&message) {
+                            if let Some(duration) = sink.poll(message) {
                                 // Reschedule after `duration` and then bail.
                                 reactivator.activate_after(duration);
                                 return true;
@@ -734,7 +736,7 @@ pub mod sink {
                             frontier = input.frontier.frontier().to_owned();
 
                             while let Some(message) = send_queue.front() {
-                                if let Some(duration) = sink.poll(&message) {
+                                if let Some(duration) = sink.poll(message) {
                                     // Reschedule after `duration` and then bail.
                                     reactivator.activate_after(duration);
                                     // Signal that work remains to be done.

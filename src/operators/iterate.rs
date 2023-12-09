@@ -41,9 +41,9 @@ use timely::dataflow::scopes::child::Iterative;
 use timely::dataflow::operators::{Feedback, ConnectLoop, Map};
 use timely::dataflow::operators::feedback::Handle;
 
-use ::{Data, Collection};
-use ::difference::{Semigroup, Abelian};
-use lattice::Lattice;
+use crate::{Data, Collection};
+use crate::difference::{Semigroup, Abelian};
+use crate::lattice::Lattice;
 
 /// An extension trait for the `iterate` method.
 pub trait Iterate<G: Scope, D: Data, R: Semigroup> {
@@ -58,22 +58,17 @@ pub trait Iterate<G: Scope, D: Data, R: Semigroup> {
     /// # Examples
     ///
     /// ```
-    /// extern crate timely;
-    /// extern crate differential_dataflow;
-    ///
     /// use differential_dataflow::input::Input;
     /// use differential_dataflow::operators::Iterate;
     ///
-    /// fn main() {
-    ///     ::timely::example(|scope| {
+    /// ::timely::example(|scope| {
     ///
-    ///         scope.new_collection_from(1 .. 10u32).1
-    ///              .iterate(|values| {
-    ///                  values.map(|x| if x % 2 == 0 { x/2 } else { x })
-    ///                        .consolidate()
-    ///              });
-    ///     });
-    /// }
+    ///     scope.new_collection_from(1 .. 10u32).1
+    ///          .iterate(|values| {
+    ///              values.map(|x| if x % 2 == 0 { x/2 } else { x })
+    ///                    .consolidate()
+    ///          });
+    /// });
     /// ```
     fn iterate<F>(&self, logic: F) -> Collection<G, D, R>
         where
@@ -136,30 +131,25 @@ impl<G: Scope, D: Ord+Data+Debug, R: Semigroup> Iterate<G, D, R> for G {
 /// The following example is equivalent to the example for the `Iterate` trait.
 ///
 /// ```
-/// extern crate timely;
-/// extern crate differential_dataflow;
-///
 /// use timely::order::Product;
 /// use timely::dataflow::Scope;
 ///
 /// use differential_dataflow::input::Input;
 /// use differential_dataflow::operators::iterate::Variable;
 ///
-/// fn main() {
-///     ::timely::example(|scope| {
+/// ::timely::example(|scope| {
 ///
-///         let numbers = scope.new_collection_from(1 .. 10u32).1;
+///     let numbers = scope.new_collection_from(1 .. 10u32).1;
 ///
-///         scope.iterative::<u64,_,_>(|nested| {
-///             let summary = Product::new(Default::default(), 1);
-///             let variable = Variable::new_from(numbers.enter(nested), summary);
-///             let result = variable.map(|x| if x % 2 == 0 { x/2 } else { x })
-///                                  .consolidate();
-///             variable.set(&result)
-///                     .leave()
-///         });
-///     })
-/// }
+///     scope.iterative::<u64,_,_>(|nested| {
+///         let summary = Product::new(Default::default(), 1);
+///         let variable = Variable::new_from(numbers.enter(nested), summary);
+///         let result = variable.map(|x| if x % 2 == 0 { x/2 } else { x })
+///                              .consolidate();
+///         variable.set(&result)
+///                 .leave()
+///     });
+/// })
 /// ```
 pub struct Variable<G: Scope, D: Data, R: Abelian>
 where G::Timestamp: Lattice {

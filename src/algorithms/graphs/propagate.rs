@@ -4,10 +4,10 @@ use std::hash::Hash;
 
 use timely::dataflow::*;
 
-use ::{Collection, ExchangeData};
-use ::lattice::Lattice;
-use ::difference::{Abelian, Multiply};
-use ::operators::arrange::arrangement::ArrangeByKey;
+use crate::{Collection, ExchangeData};
+use crate::lattice::Lattice;
+use crate::difference::{Abelian, Multiply};
+use crate::operators::arrange::arrangement::ArrangeByKey;
 
 /// Propagates labels forward, retaining the minimum label.
 ///
@@ -46,8 +46,8 @@ where
     propagate_core(&edges.arrange_by_key(), nodes, logic)
 }
 
-use trace::TraceReader;
-use operators::arrange::arrangement::Arranged;
+use crate::trace::TraceReader;
+use crate::operators::arrange::arrangement::Arranged;
 
 /// Propagates labels forward, retaining the minimum label.
 ///
@@ -97,7 +97,7 @@ where
         let labels =
         proposals
             .concat(&nodes)
-            .reduce_abelian::<_,ValSpine<_,_,_,_>>("Propagate", |_, s, t| t.push((s[0].0.clone(), R::from(1 as i8))));
+            .reduce_abelian::<_,ValSpine<_,_,_,_>>("Propagate", |_, s, t| t.push((s[0].0.clone(), R::from(1_i8))));
 
         let propagate: Collection<_, (N, L), R> =
         labels

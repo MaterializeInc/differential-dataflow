@@ -9,8 +9,8 @@
 use timely::progress::Timestamp;
 use timely::progress::{Antichain, frontier::AntichainRef};
 
-use trace::{TraceReader, BatchReader, Description};
-use trace::cursor::Cursor;
+use crate::trace::{TraceReader, BatchReader, Description};
+use crate::trace::cursor::Cursor;
 use crate::lattice::Lattice;
 
 /// Wrapper to provide trace to nested scope.
@@ -118,7 +118,7 @@ where
         BatchCursorFrontier::new(self.batch.cursor(), self.since.borrow(), self.until.borrow())
     }
     fn len(&self) -> usize { self.batch.len() }
-    fn description(&self) -> &Description<B::Time> { &self.batch.description() }
+    fn description(&self) -> &Description<B::Time> { self.batch.description() }
 }
 
 impl<B> BatchFrontier<B>

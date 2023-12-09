@@ -13,10 +13,13 @@ pub mod implementations;
 pub mod wrappers;
 
 use timely::communication::message::RefOrMut;
+use timely::logging::WorkerIdentifier;
+use timely::logging_core::Logger;
 use timely::progress::{Antichain, frontier::AntichainRef};
 use timely::progress::Timestamp;
 
-use trace::cursor::MyTrait;
+use crate::logging::DifferentialEvent;
+use crate::trace::cursor::MyTrait;
 
 // use ::difference::Semigroup;
 pub use self::cursor::Cursor;
@@ -220,7 +223,7 @@ where <Self as TraceReader>::Batch: Batch {
     /// Allocates a new empty trace.
     fn new(
         info: ::timely::dataflow::operators::generic::OperatorInfo,
-        logging: Option<::logging::Logger>,
+        logging: Option<crate::logging::Logger>,
         activator: Option<timely::scheduling::activate::Activator>,
     ) -> Self;
 
@@ -313,7 +316,7 @@ pub trait Batcher {
     /// Times at which batches are formed.
     type Time: Timestamp;
     /// Allocates a new empty batcher.
-    fn new() -> Self;
+    fn new(logger: Option<Logger<DifferentialEvent, WorkerIdentifier>>, operator_id: usize) -> Self;
     /// Adds an unordered batch of elements to the batcher.
     fn push_batch(&mut self, batch: RefOrMut<Vec<Self::Item>>);
     /// Returns all updates not greater or equal to an element of `upper`.
@@ -396,13 +399,13 @@ pub mod rc_blanket_impls {
         type Cursor = RcBatchCursor<B::Cursor>;
         /// Acquires a cursor to the batch's contents.
         fn cursor(&self) -> Self::Cursor {
-            RcBatchCursor::new((&**self).cursor())
+            RcBatchCursor::new((**self).cursor())
         }
 
         /// The number of updates in the batch.
-        fn len(&self) -> usize { (&**self).len() }
+        fn len(&self) -> usize { (**self).len() }
         /// Describes the times of the updates in the batch.
-        fn description(&self) -> &Description<Self::Time> { (&**self).description() }
+        fn description(&self) -> &Description<Self::Time> { (**self).description() }
     }
 
     /// Wrapper to provide cursor to nested scope.
@@ -483,9 +486,6 @@ pub mod rc_blanket_impls {
 
 /// Blanket implementations for reference counted batches.
 pub mod abomonated_blanket_impls {
-
-    extern crate abomonation;
-
     use abomonation::{Abomonation, measure};
     use abomonation::abomonated::Abomonated;
     use timely::progress::{Antichain, frontier::AntichainRef};
@@ -505,13 +505,13 @@ pub mod abomonated_blanket_impls {
         type Cursor = AbomonatedBatchCursor<B::Cursor>;
         /// Acquires a cursor to the batch's contents.
         fn cursor(&self) -> Self::Cursor {
-            AbomonatedBatchCursor::new((&**self).cursor())
+            AbomonatedBatchCursor::new((**self).cursor())
         }
 
         /// The number of updates in the batch.
-        fn len(&self) -> usize { (&**self).len() }
+        fn len(&self) -> usize { (**self).len() }
         /// Describes the times of the updates in the batch.
-        fn description(&self) -> &Description<Self::Time> { (&**self).description() }
+        fn description(&self) -> &Description<Self::Time> { (**self).description() }
     }
 
     /// Wrapper to provide cursor to nested scope.

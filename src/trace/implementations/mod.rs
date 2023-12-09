@@ -40,8 +40,8 @@
 
 pub mod spine_fueled;
 
-mod merge_batcher;
-pub(crate) mod merge_batcher_col;
+pub mod merge_batcher;
+pub mod merge_batcher_col;
 
 pub use self::merge_batcher::MergeBatcher as Batcher;
 
@@ -56,8 +56,8 @@ pub use self::ord_neu::OrdKeySpine as KeySpine;
 use std::borrow::{ToOwned};
 
 use timely::container::columnation::{Columnation, TimelyStack};
-use lattice::Lattice;
-use difference::Semigroup;
+use crate::lattice::Lattice;
+use crate::difference::Semigroup;
 
 /// A type that names constituent update types.
 pub trait Update {
@@ -220,6 +220,7 @@ where
 // }
 
 use std::convert::TryInto;
+use abomonation_derive::Abomonation;
 
 /// A list of unsigned integers that uses `u32` elements as long as they are small enough, and switches to `u64` once they are not.
 #[derive(Eq, PartialEq, Ord, PartialOrd, Clone, Debug, Abomonation)]
@@ -312,7 +313,7 @@ pub mod containers {
     use timely::container::columnation::{Columnation, TimelyStack};
 
     use std::borrow::{Borrow, ToOwned};
-    use trace::MyTrait;
+    use crate::trace::MyTrait;
 
     /// A general-purpose container resembling `Vec<T>`.
     pub trait BatchContainer: Default + 'static {
@@ -327,7 +328,7 @@ pub mod containers {
         /// Inserts an owned item.
         fn copy_push(&mut self, item: &Self::PushItem);
         /// Inserts a borrowed item.
-        fn copy<'a>(&mut self, item: Self::ReadItem<'a>);
+        fn copy(&mut self, item: Self::ReadItem<'_>);
         /// Extends from a slice of items.
         fn copy_slice(&mut self, slice: &[Self::PushItem]);
         /// Extends from a range of items in another`Self`.
@@ -340,11 +341,11 @@ pub mod containers {
         fn merge_capacity(cont1: &Self, cont2: &Self) -> Self;
 
         /// Reference to the element at this position.
-        fn index<'a>(&'a self, index: usize) -> Self::ReadItem<'a>;
+        fn index(&self, index: usize) -> Self::ReadItem<'_>;
         /// Number of contained elements
         fn len(&self) -> usize;
         /// Returns the last item if the container is non-empty.
-        fn last<'a>(&'a self) -> Option<Self::ReadItem<'a>> {
+        fn last(&self) -> Option<Self::ReadItem<'_>> {
             if self.len() > 0 {
                 Some(self.index(self.len()-1))
             }
@@ -374,16 +375,16 @@ pub mod containers {
                     let mut step = 1;
                     while start + index + step < end && function(self.index(start + index + step)) {
                         index += step;
-                        step = step << 1;
+                        step <<= 1;
                     }
 
                     // advance in exponentially shrinking steps.
-                    step = step >> 1;
+                    step >>= 1;
                     while step > 0 {
                         if start + index + step < end && function(self.index(start + index + step)) {
                             index += step;
                         }
-                        step = step >> 1;
+                        step >>= 1;
                     }
 
                     index += 1;
@@ -428,7 +429,7 @@ pub mod containers {
         fn merge_capacity(cont1: &Self, cont2: &Self) -> Self {
             Vec::with_capacity(cont1.len() + cont2.len())
         }
-        fn index<'a>(&'a self, index: usize) -> Self::ReadItem<'a> {
+        fn index(&self, index: usize) -> Self::ReadItem<'_> {
             &self[index]
         }
         fn len(&self) -> usize {
@@ -474,7 +475,7 @@ pub mod containers {
             new.reserve_regions(std::iter::once(cont1).chain(std::iter::once(cont2)));
             new
         }
-        fn index<'a>(&'a self, index: usize) -> Self::ReadItem<'a> {
+        fn index(&self, index: usize) -> Self::ReadItem<'_> {
             &self[index]
         }
         fn len(&self) -> usize {
@@ -508,7 +509,7 @@ pub mod containers {
         fn copy_push(&mut self, item: &Vec<B>) {
             self.copy(&item[..]);
         }
-        fn copy<'a>(&mut self, item: Self::ReadItem<'a>) {
+        fn copy(&mut self, item: Self::ReadItem<'_>) {
             for x in item.iter() {
                 self.inner.copy(x);
             }
@@ -542,7 +543,7 @@ pub mod containers {
                 inner: Vec::with_capacity(cont1.inner.len() + cont2.inner.len()),
             }
         }
-        fn index<'a>(&'a self, index: usize) -> Self::ReadItem<'a> {
+        fn index(&self, index: usize) -> Self::ReadItem<'_> {
             let lower = self.offsets[index];
             let upper = self.offsets[index+1];
             &self.inner[lower .. upper]
@@ -584,24 +585,19 @@ pub mod containers {
 
     impl<'a, B> Copy for Greetings<'a, B> { }
     impl<'a, B> Clone for Greetings<'a, B> { 
-        fn clone(&self) -> Self {
-            Self {
-                text: self.text.clone(),
-                slice: self.slice,
-            }
-        }
+        fn clone(&self) -> Self { *self }
     }
 
     use std::cmp::Ordering;
     impl<'a, 'b, B: Ord> PartialEq<Greetings<'a, B>> for Greetings<'b, B> {
         fn eq(&self, other: &Greetings<'a, B>) -> bool {
-            self.slice.eq(&other.slice[..])
+            self.slice.eq(other.slice)
         }
     }
     impl<'a, B: Ord> Eq for Greetings<'a, B> { }
     impl<'a, 'b, B: Ord> PartialOrd<Greetings<'a, B>> for Greetings<'b, B> {
         fn partial_cmp(&self, other: &Greetings<'a, B>) -> Option<Ordering> {
-            self.slice.partial_cmp(&other.slice[..])
+            self.slice.partial_cmp(other.slice)
         }
     }
     impl<'a, B: Ord> Ord for Greetings<'a, B> {
@@ -644,7 +640,7 @@ pub mod containers {
         fn copy_push(&mut self, item: &Vec<B>) {
             self.copy(<_ as MyTrait>::borrow_as(item));
         }
-        fn copy<'a>(&mut self, item: Self::ReadItem<'a>) {
+        fn copy(&mut self, item: Self::ReadItem<'_>) {
             for x in item.slice.iter() {
                 self.inner.copy(x);
             }
@@ -680,7 +676,7 @@ pub mod containers {
                 inner: Vec::with_capacity(cont1.inner.len() + cont2.inner.len()),
             }
         }
-        fn index<'a>(&'a self, index: usize) -> Self::ReadItem<'a> {
+        fn index(&self, index: usize) -> Self::ReadItem<'_> {
             let lower = self.offsets[index];
             let upper = self.offsets[index+1];
             Greetings {
@@ -703,13 +699,4 @@ pub mod containers {
             }
         }
     }
-
-    // use trace::implementations::RetainFrom;
-    // /// A container that can retain/discard from some offset onward.
-    // impl<B> RetainFrom<[B]> for SliceContainer<B> {
-    //     /// Retains elements from an index onwards that satisfy a predicate.
-    //     fn retain_from<P: FnMut(usize, &[B])->bool>(&mut self, _index: usize, _predicate: P) {
-    //         unimplemented!()
-    //     }
-    // }
 }

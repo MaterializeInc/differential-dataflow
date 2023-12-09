@@ -23,10 +23,10 @@ use timely::dataflow::Scope;
 use timely::dataflow::operators::Map;
 use timely::progress::frontier::AntichainRef;
 
-use operators::arrange::Arranged;
-use lattice::Lattice;
-use trace::{TraceReader, BatchReader, Description};
-use trace::cursor::Cursor;
+use crate::operators::arrange::Arranged;
+use crate::lattice::Lattice;
+use crate::trace::{TraceReader, BatchReader, Description};
+use crate::trace::cursor::Cursor;
 
 /// Freezes updates to an arrangement using a supplied function.
 ///
@@ -123,10 +123,7 @@ where
 {
     /// Makes a new trace wrapper
     pub fn make_from(trace: Tr, func: Rc<F>) -> Self {
-        TraceFreeze {
-            trace: trace,
-            func: func,
-        }
+        Self { trace, func }
     }
 }
 
@@ -176,10 +173,7 @@ where
 {
     /// Makes a new batch wrapper
     pub fn make_from(batch: B, func: Rc<F>) -> Self {
-        BatchFreeze {
-            batch: batch,
-            func: func,
-        }
+        Self { batch, func }
     }
 }
 
@@ -191,10 +185,7 @@ pub struct CursorFreeze<C, F> {
 
 impl<C, F> CursorFreeze<C, F> {
     fn new(cursor: C, func: Rc<F>) -> Self {
-        CursorFreeze {
-            cursor: cursor,
-            func: func,
-        }
+        Self { cursor, func }
     }
 }
 
@@ -247,10 +238,7 @@ pub struct BatchCursorFreeze<C, F> {
 
 impl<C, F> BatchCursorFreeze<C, F> {
     fn new(cursor: C, func: Rc<F>) -> Self {
-        BatchCursorFreeze {
-            cursor: cursor,
-            func: func,
-        }
+        Self { cursor, func }
     }
 }
 

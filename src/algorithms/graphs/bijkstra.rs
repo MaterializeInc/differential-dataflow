@@ -5,10 +5,10 @@ use std::hash::Hash;
 use timely::order::Product;
 use timely::dataflow::*;
 
-use ::{Collection, ExchangeData};
-use ::operators::*;
-use ::lattice::Lattice;
-use ::operators::iterate::Variable;
+use crate::{Collection, ExchangeData};
+use crate::operators::*;
+use crate::lattice::Lattice;
+use crate::operators::iterate::Variable;
 
 /// Returns the subset of `goals` that can reach each other in `edges`, with distance.
 ///
@@ -26,7 +26,7 @@ where
     G::Timestamp: Lattice+Ord,
     N: ExchangeData+Hash,
 {
-    use operators::arrange::arrangement::ArrangeByKey;
+    use crate::operators::arrange::arrangement::ArrangeByKey;
     let forward = edges.arrange_by_key();
     let reverse = edges.map(|(x,y)| (y,x)).arrange_by_key();
     bidijkstra_arranged(&forward, &reverse, goals)
@@ -76,7 +76,7 @@ where
         let reached =
         forward
             .join_map(&reverse, |_, (src,d1), (dst,d2)| ((src.clone(), dst.clone()), *d1 + *d2))
-            .reduce(|_key, s, t| t.push((s[0].0.clone(), 1)))
+            .reduce(|_key, s, t| t.push((*s[0].0, 1)))
             .semijoin(&goals);
 
         let active =
@@ -96,7 +96,7 @@ where
             .join_core(&forward_edges, |_med, (src, dist), next| Some((next.clone(), (src.clone(), *dist+1))))
             .concat(&forward)
             .map(|(next, (src, dist))| ((next, src), dist))
-            .reduce(|_key, s, t| t.push((s[0].0.clone(), 1)))
+            .reduce(|_key, s, t| t.push((*s[0].0, 1)))
             .map(|((next, src), dist)| (next, (src, dist)));
 
         forward_next.map(|_| ()).consolidate().inspect(|x| println!("forward_next: {:?}", x));
@@ -113,7 +113,7 @@ where
             .join_core(&reverse_edges, |_med, (rev, dist), next| Some((next.clone(), (rev.clone(), *dist+1))))
             .concat(&reverse)
             .map(|(next, (rev, dist))| ((next, rev), dist))
-            .reduce(|_key, s, t| t.push((s[0].0.clone(), 1)))
+            .reduce(|_key, s, t| t.push((*s[0].0, 1)))
             .map(|((next,rev), dist)| (next, (rev, dist)));
 
         reverse_next.map(|_| ()).consolidate().inspect(|x| println!("reverse_next: {:?}", x));

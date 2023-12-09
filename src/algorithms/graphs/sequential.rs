@@ -4,10 +4,10 @@ use std::hash::Hash;
 
 use timely::dataflow::*;
 
-use ::{Collection, ExchangeData};
-use ::lattice::Lattice;
-use ::operators::*;
-use hashable::Hashable;
+use crate::{Collection, ExchangeData};
+use crate::lattice::Lattice;
+use crate::operators::*;
+use crate::hashable::Hashable;
 
 fn _color<G, N>(edges: &Collection<G, (N,N)>) -> Collection<G,(N,Option<u32>)>
 where
@@ -20,14 +20,13 @@ where
                      .distinct();
 
     // repeatedly apply color-picking logic.
-    sequence(&start, &edges, |_node, vals| {
+    sequence(&start, edges, |_node, vals| {
 
         // look for the first absent positive integer.
         // start at 1 in case we ever use NonZero<u32>.
 
         (1u32 ..)
-            .filter(|&i| vals.get(i as usize - 1).map(|x| *x.0) != Some(i))
-            .next()
+            .find(|&i| vals.get(i as usize - 1).map(|x| *x.0) != Some(i))
             .unwrap()
     })
 }

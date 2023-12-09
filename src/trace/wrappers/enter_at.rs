@@ -4,9 +4,9 @@ use timely::progress::timestamp::Refines;
 use timely::progress::Timestamp;
 use timely::progress::{Antichain, frontier::AntichainRef};
 
-use lattice::Lattice;
-use trace::{TraceReader, BatchReader, Description};
-use trace::cursor::Cursor;
+use crate::lattice::Lattice;
+use crate::trace::{TraceReader, BatchReader, Description};
+use crate::trace::cursor::Cursor;
 
 /// Wrapper to provide trace to nested scope.
 ///
@@ -121,7 +121,7 @@ where
     /// Makes a new trace wrapper
     pub fn make_from(trace: Tr, logic: F, prior: G) -> Self {
         TraceEnter {
-            trace: trace,
+            trace,
             stash1: Antichain::new(),
             stash2: Antichain::new(),
             logic,

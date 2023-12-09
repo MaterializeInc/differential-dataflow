@@ -18,9 +18,9 @@ pub mod join;
 pub mod count;
 pub mod threshold;
 
-use ::difference::Semigroup;
-use lattice::Lattice;
-use trace::Cursor;
+use crate::difference::Semigroup;
+use crate::lattice::Lattice;
+use crate::trace::Cursor;
 
 /// An accumulation of (value, time, diff) updates.
 struct EditList<'a, C: Cursor> where C::Time: Sized, C::Diff: Sized {
@@ -204,5 +204,5 @@ where
         }
         crate::consolidation::consolidate(&mut self.replay.buffer);
     }
-    fn is_done(&self) -> bool { self.replay.history.len() == 0 }
+    fn is_done(&self) -> bool { self.replay.history.is_empty() }
 }

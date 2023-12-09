@@ -11,9 +11,9 @@ use timely::dataflow::operators::Input as TimelyInput;
 use timely::dataflow::operators::input::Handle;
 use timely::dataflow::scopes::ScopeParent;
 
-use ::Data;
-use ::difference::Semigroup;
-use collection::{Collection, AsCollection};
+use crate::Data;
+use crate::difference::Semigroup;
+use crate::collection::{Collection, AsCollection};
 
 /// Create a new collection and input handle to control the collection.
 pub trait Input : TimelyInput {
@@ -22,29 +22,24 @@ pub trait Input : TimelyInput {
     /// # Examples
     ///
     /// ```
-    /// extern crate timely;
-    /// extern crate differential_dataflow;
-    ///
     /// use timely::Config;
     /// use differential_dataflow::input::Input;
     ///
-    /// fn main() {
-    ///     ::timely::execute(Config::thread(), |worker| {
+    /// ::timely::execute(Config::thread(), |worker| {
     ///
-    ///            let (mut handle, probe) = worker.dataflow::<(),_,_>(|scope| {
-    ///                // create input handle and collection.
-    ///                let (handle, data) = scope.new_collection();
-    ///             let probe = data.map(|x| x * 2)
-    ///                                .inspect(|x| println!("{:?}", x))
-    ///                                .probe();
-    ///                (handle, probe)
-    ///         });
+    ///     let (mut handle, probe) = worker.dataflow::<(),_,_>(|scope| {
+    ///         // create input handle and collection.
+    ///         let (handle, data) = scope.new_collection();
+    ///         let probe = data.map(|x| x * 2)
+    ///                         .inspect(|x| println!("{:?}", x))
+    ///                         .probe();
+    ///         (handle, probe)
+    ///     });
     ///
-    ///            handle.insert(1);
-    ///            handle.insert(5);
+    ///     handle.insert(1);
+    ///     handle.insert(5);
     ///
-    ///        }).unwrap();
-    /// }
+    /// }).unwrap();
     /// ```
     fn new_collection<D, R>(&mut self) -> (InputSession<<Self as ScopeParent>::Timestamp, D, R>, Collection<Self, D, R>)
     where D: Data, R: Semigroup;
@@ -53,29 +48,24 @@ pub trait Input : TimelyInput {
     /// # Examples
     ///
     /// ```
-    /// extern crate timely;
-    /// extern crate differential_dataflow;
-    ///
     /// use timely::Config;
     /// use differential_dataflow::input::Input;
     ///
-    /// fn main() {
-    ///     ::timely::execute(Config::thread(), |worker| {
+    /// ::timely::execute(Config::thread(), |worker| {
     ///
-    ///            let (mut handle, probe) = worker.dataflow::<(),_,_>(|scope| {
-    ///                // create input handle and collection.
-    ///                let (handle, data) = scope.new_collection_from(0 .. 10);
-    ///             let probe = data.map(|x| x * 2)
-    ///                                .inspect(|x| println!("{:?}", x))
-    ///                                .probe();
-    ///                (handle, probe)
-    ///         });
+    ///     let (mut handle, probe) = worker.dataflow::<(),_,_>(|scope| {
+    ///         // create input handle and collection.
+    ///          let (handle, data) = scope.new_collection_from(0 .. 10);
+    ///          let probe = data.map(|x| x * 2)
+    ///                          .inspect(|x| println!("{:?}", x))
+    ///                          .probe();
+    ///          (handle, probe)
+    ///     });
     ///
-    ///            handle.insert(1);
-    ///            handle.insert(5);
+    ///     handle.insert(1);
+    ///     handle.insert(5);
     ///
-    ///        }).unwrap();
-    /// }
+    /// }).unwrap();
     /// ```
     fn new_collection_from<I>(&mut self, data: I) -> (InputSession<<Self as ScopeParent>::Timestamp, I::Item, isize>, Collection<Self, I::Item, isize>)
     where I: IntoIterator+'static, I::Item: Data;
@@ -84,35 +74,30 @@ pub trait Input : TimelyInput {
     /// # Examples
     ///
     /// ```
-    /// extern crate timely;
-    /// extern crate differential_dataflow;
-    ///
     /// use timely::Config;
     /// use differential_dataflow::input::Input;
     ///
-    /// fn main() {
-    ///     ::timely::execute(Config::thread(), |worker| {
+    /// ::timely::execute(Config::thread(), |worker| {
     ///
-    ///         let (mut handle, probe) = worker.dataflow::<(),_,_>(|scope| {
-    ///             // create input handle and collection.
-    ///             let (handle, data) = scope.new_collection_from(0 .. 10);
-    ///             let probe = data.map(|x| x * 2)
-    ///                             .inspect(|x| println!("{:?}", x))
-    ///                             .probe();
-    ///             (handle, probe)
-    ///         });
+    ///     let (mut handle, probe) = worker.dataflow::<(),_,_>(|scope| {
+    ///         // create input handle and collection.
+    ///         let (handle, data) = scope.new_collection_from(0 .. 10);
+    ///         let probe = data.map(|x| x * 2)
+    ///                         .inspect(|x| println!("{:?}", x))
+    ///                         .probe();
+    ///         (handle, probe)
+    ///     });
     ///
-    ///         handle.insert(1);
-    ///         handle.insert(5);
+    ///     handle.insert(1);
+    ///     handle.insert(5);
     ///
-    ///     }).unwrap();
-    /// }
+    /// }).unwrap();
     /// ```
     fn new_collection_from_raw<D, R, I>(&mut self, data: I) -> (InputSession<<Self as ScopeParent>::Timestamp, D, R>, Collection<Self, D, R>)
     where I: IntoIterator<Item=(D,<Self as ScopeParent>::Timestamp,R)>+'static, D: Data, R: Semigroup+Data;
 }
 
-use lattice::Lattice;
+use crate::lattice::Lattice;
 impl<G: TimelyInput> Input for G where <G as ScopeParent>::Timestamp: Lattice {
     fn new_collection<D, R>(&mut self) -> (InputSession<<G as ScopeParent>::Timestamp, D, R>, Collection<G, D, R>)
     where D: Data, R: Semigroup{
@@ -147,44 +132,39 @@ impl<G: TimelyInput> Input for G where <G as ScopeParent>::Timestamp: Lattice {
 /// # Examples
 ///
 /// ```
-/// extern crate timely;
-/// extern crate differential_dataflow;
-///
 /// use timely::Config;
 /// use differential_dataflow::input::Input;
 ///
-/// fn main() {
-///     ::timely::execute(Config::thread(), |worker| {
+/// ::timely::execute(Config::thread(), |worker| {
 ///
-///            let (mut handle, probe) = worker.dataflow(|scope| {
-///                // create input handle and collection.
-///                let (handle, data) = scope.new_collection_from(0 .. 10);
-///             let probe = data.map(|x| x * 2)
-///                                .inspect(|x| println!("{:?}", x))
-///                                .probe();
-///                (handle, probe)
-///         });
+///     let (mut handle, probe) = worker.dataflow(|scope| {
+///         // create input handle and collection.
+///         let (handle, data) = scope.new_collection_from(0 .. 10);
+///         let probe = data.map(|x| x * 2)
+///                         .inspect(|x| println!("{:?}", x))
+///                         .probe();
+///         (handle, probe)
+///     });
 ///
-///            handle.insert(3);
-///            handle.advance_to(1);
-///            handle.insert(5);
-///            handle.advance_to(2);
-///            handle.flush();
+///     handle.insert(3);
+///     handle.advance_to(1);
+///     handle.insert(5);
+///     handle.advance_to(2);
+///     handle.flush();
 ///
-///            while probe.less_than(handle.time()) {
-///                worker.step();
-///            }
+///     while probe.less_than(handle.time()) {
+///         worker.step();
+///     }
 ///
-///            handle.remove(5);
-///            handle.advance_to(3);
-///            handle.flush();
+///     handle.remove(5);
+///     handle.advance_to(3);
+///     handle.flush();
 ///
-///            while probe.less_than(handle.time()) {
-///                worker.step();
-///            }
+///     while probe.less_than(handle.time()) {
+///         worker.step();
+///     }
 ///
-///        }).unwrap();
-/// }
+/// }).unwrap();
 /// ```
 pub struct InputSession<T: Timestamp+Clone, D: Data, R: Semigroup> {
     time: T,
@@ -247,7 +227,7 @@ impl<T: Timestamp+Clone, D: Data, R: Semigroup> InputSession<T, D, R> {
     /// Adds to the weight of an element in the collection.
     pub fn update(&mut self, element: D, change: R) {
         if self.buffer.len() == self.buffer.capacity() {
-            if self.buffer.len() > 0 {
+            if !self.buffer.is_empty() {
                 self.handle.send_batch(&mut self.buffer);
             }
             // TODO : This is a fairly arbitrary choice; should probably use `Context::default_size()` or such.
@@ -260,7 +240,7 @@ impl<T: Timestamp+Clone, D: Data, R: Semigroup> InputSession<T, D, R> {
     pub fn update_at(&mut self, element: D, time: T, change: R) {
         assert!(self.time.less_equal(&time));
         if self.buffer.len() == self.buffer.capacity() {
-            if self.buffer.len() > 0 {
+            if !self.buffer.is_empty() {
                 self.handle.send_batch(&mut self.buffer);
             }
             // TODO : This is a fairly arbitrary choice; should probably use `Context::default_size()` or such.

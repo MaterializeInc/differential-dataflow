@@ -2,10 +2,10 @@
 
 use timely::dataflow::Scope;
 
-use ::{Collection, ExchangeData, Hashable};
-use ::lattice::Lattice;
-use ::operators::*;
-use ::difference::Abelian;
+use crate::{Collection, ExchangeData, Hashable};
+use crate::lattice::Lattice;
+use crate::operators::*;
+use crate::difference::Abelian;
 
 /// Assign unique identifiers to elements of a collection.
 pub trait Identifiers<G: Scope, D: ExchangeData, R: ExchangeData+Abelian> {
@@ -13,25 +13,20 @@ pub trait Identifiers<G: Scope, D: ExchangeData, R: ExchangeData+Abelian> {
     ///
     /// # Example
     /// ```
-    /// extern crate timely;
-    /// extern crate differential_dataflow;
-    ///
     /// use differential_dataflow::input::Input;
     /// use differential_dataflow::algorithms::identifiers::Identifiers;
     /// use differential_dataflow::operators::Threshold;
     ///
-    /// fn main() {
-    ///     ::timely::example(|scope| {
+    /// ::timely::example(|scope| {
     ///
-    ///         let identifiers =
-    ///         scope.new_collection_from(1 .. 10).1
-    ///              .identifiers()
-    ///              // assert no conflicts
-    ///              .map(|(data, id)| id)
-    ///              .threshold(|_id,cnt| if cnt > &1 { *cnt } else { 0 })
-    ///              .assert_empty();
-    ///     });
-    /// }
+    ///     let identifiers =
+    ///     scope.new_collection_from(1 .. 10).1
+    ///          .identifiers()
+    ///          // assert no conflicts
+    ///          .map(|(data, id)| id)
+    ///          .threshold(|_id,cnt| if cnt > &1 { *cnt } else { 0 })
+    ///          .assert_empty();
+    /// });
     /// ```
     fn identifiers(&self) -> Collection<G, (D, u64), R>;
 }
@@ -59,14 +54,14 @@ where
         // very rare, and maintaining winners in both the input and output
         // of `reduce` is an unneccesary duplication.
 
-        use collection::AsCollection;
+        use crate::collection::AsCollection;
 
         let init = self.map(|record| (0, record));
         timely::dataflow::operators::generic::operator::empty(&init.scope())
             .as_collection()
             .iterate(|diff|
                 init.enter(&diff.scope())
-                    .concat(&diff)
+                    .concat(diff)
                     .map(|pair| (pair.hashed(), pair))
                     .reduce(|_hash, input, output| {
                         // keep round-positive records as changes.
@@ -99,15 +94,15 @@ mod tests {
         // a version with a crippled hash function to see that even if
         // there are collisions, everyone gets a unique identifier.
 
-        use ::input::Input;
-        use ::operators::{Threshold, Reduce};
-        use ::operators::iterate::Iterate;
+        use crate::input::Input;
+        use crate::operators::{Threshold, Reduce};
+        use crate::operators::iterate::Iterate;
 
         ::timely::example(|scope| {
 
             let input = scope.new_collection_from(1 .. 4).1;
 
-            use collection::AsCollection;
+            use crate::collection::AsCollection;
 
             let init = input.map(|record| (0, record));
             timely::dataflow::operators::generic::operator::empty(&init.scope())
