@@ -48,12 +48,14 @@ pub use self::merge_batcher::MergeBatcher as Batcher;
 pub mod ord_neu;
 pub mod rhh;
 pub mod huffman_container;
+pub mod option_container;
 
 // Opinionated takes on default spines.
 pub use self::ord_neu::OrdValSpine as ValSpine;
 pub use self::ord_neu::OrdKeySpine as KeySpine;
 
 use std::borrow::{ToOwned};
+use std::cmp::Ordering;
 
 use timely::container::columnation::{Columnation, TimelyStack};
 use crate::lattice::Lattice;
@@ -97,6 +99,8 @@ pub trait Layout {
     /// Container for update vals.
     type UpdContainer:
         for<'a> BatchContainer<PushItem=(<Self::Target as Update>::Time, <Self::Target as Update>::Diff), ReadItem<'a> = &'a (<Self::Target as Update>::Time, <Self::Target as Update>::Diff)>;
+    /// Container for offsets.
+    type OffsetContainer: BatchContainer<PushItem=usize>;
 }
 
 /// A layout that uses vectors
@@ -113,6 +117,7 @@ where
     type KeyContainer = Vec<U::Key>;
     type ValContainer = Vec<U::Val>;
     type UpdContainer = Vec<(U::Time, U::Diff)>;
+    type OffsetContainer = OffsetList;
 }
 
 /// A layout based on timely stacks
@@ -131,6 +136,7 @@ where
     type KeyContainer = TimelyStack<U::Key>;
     type ValContainer = TimelyStack<U::Val>;
     type UpdContainer = TimelyStack<(U::Time, U::Diff)>;
+    type OffsetContainer = OffsetList;
 }
 
 /// A type with a preferred container.
@@ -183,14 +189,19 @@ where
     type KeyContainer = K::Container;
     type ValContainer = V::Container;
     type UpdContainer = Vec<(T, D)>;
+    type OffsetContainer = OffsetList;
 }
 
 use std::convert::TryInto;
+use std::ops::Deref;
 use abomonation_derive::Abomonation;
+use crate::trace::cursor::MyTrait;
 
 /// A list of unsigned integers that uses `u32` elements as long as they are small enough, and switches to `u64` once they are not.
 #[derive(Eq, PartialEq, Ord, PartialOrd, Clone, Debug, Abomonation)]
 pub struct OffsetList {
+    /// Length of a prefix of zero elements.
+    pub zero_prefix: usize,
     /// Offsets that fit within a `u32`.
     pub smol: Vec<u32>,
     /// Offsets that either do not fit in a `u32`, or are inserted after some offset that did not fit.
@@ -198,9 +209,20 @@ pub struct OffsetList {
 }
 
 impl OffsetList {
+    /// Allocate a new list with a specified capacity.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            zero_prefix: 0,
+            smol: Vec::with_capacity(cap),
+            chonk: Vec::new(),
+        }
+    }
     /// Inserts the offset, as a `u32` if that is still on the table.
     pub fn push(&mut self, offset: usize) {
-        if self.chonk.is_empty() {
+        if self.smol.is_empty() && self.chonk.is_empty() && offset == 0 {
+            self.zero_prefix += 1;
+        }
+        else if self.chonk.is_empty() {
             if let Ok(smol) = offset.try_into() {
                 self.smol.push(smol);
             } 
@@ -214,60 +236,90 @@ impl OffsetList {
     }
     /// Like `std::ops::Index`, which we cannot implement as it must return a `&usize`.
     pub fn index(&self, index: usize) -> usize {
-        if index < self.smol.len() {
-            self.smol[index].try_into().unwrap()
+        if index < self.zero_prefix {
+            0
+        }
+        else if index - self.zero_prefix < self.smol.len() {
+            self.smol[index - self.zero_prefix].try_into().unwrap()
         }
         else {
-            self.chonk[index - self.smol.len()].try_into().unwrap()
+            self.chonk[index - self.zero_prefix - self.smol.len()].try_into().unwrap()
         }
     }
-    /// Set the offset at location index.
-    ///
-    /// Complicated if `offset` does not fit into `self.smol`.
-    pub fn set(&mut self, index: usize, offset: usize) {
-        if index < self.smol.len() {
-            if let Ok(off) = offset.try_into() {
-                self.smol[index] = off;
-            }
-            else {
-                // Move all `smol` elements from `index` onward to the front of `chonk`.
-                self.chonk.splice(0..0, self.smol.drain(index ..).map(|x| x.try_into().unwrap()));
-                self.chonk[index - self.smol.len()] = offset.try_into().unwrap();
-            }
-        }
-        else {
-            self.chonk[index - self.smol.len()] = offset.try_into().unwrap();
-        }
-    }
-    /// The last element in the list of offsets, if non-empty.
-    pub fn last(&self) -> Option<usize> {
-        if self.chonk.is_empty() {
-            self.smol.last().map(|x| (*x).try_into().unwrap())
-        }
-        else {
-            self.chonk.last().map(|x| (*x).try_into().unwrap())
-        }
-    }
-    /// THe number of offsets in the list.
+    /// The number of offsets in the list.
     pub fn len(&self) -> usize {
-        self.smol.len() + self.chonk.len()
+        self.zero_prefix + self.smol.len() + self.chonk.len()
     }
-    /// Allocate a new list with a specified capacity.
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            smol: Vec::with_capacity(cap),
-            chonk: Vec::new(),
+}
+
+/// Helper struct to provide `MyTrait` for `Copy` types.
+#[derive(Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
+pub struct Wrapper<T: Copy>(T);
+
+impl<T: Copy> Deref for Wrapper<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a, T: Copy + Ord> MyTrait<'a> for Wrapper<T> {
+    type Owned = T;
+
+    fn into_owned(self) -> Self::Owned {
+        self.0
+    }
+
+    fn clone_onto(&self, other: &mut Self::Owned) {
+        *other = self.0;
+    }
+
+    fn compare(&self, other: &Self::Owned) -> Ordering {
+        self.0.cmp(other)
+    }
+
+    fn borrow_as(other: &'a Self::Owned) -> Self {
+        Self(*other)
+    }
+}
+
+impl BatchContainer for OffsetList {
+    type PushItem = usize;
+    type ReadItem<'a> = Wrapper<usize>;
+
+    fn push(&mut self, item: Self::PushItem) {
+        self.push(item);
+    }
+
+    fn copy_push(&mut self, item: &Self::PushItem) {
+        self.push(*item);
+    }
+
+    fn copy(&mut self, item: Self::ReadItem<'_>) {
+        self.push(item.0);
+    }
+
+    fn copy_range(&mut self, other: &Self, start: usize, end: usize) {
+        for offset in start..end {
+            self.push(other.index(offset));
         }
     }
-    /// Trim all elements at index `length` and greater.
-    pub fn truncate(&mut self, length: usize) {
-        if length > self.smol.len() {
-            self.chonk.truncate(length - self.smol.len());
-        }
-        else {
-            assert!(self.chonk.is_empty());
-            self.smol.truncate(length);
-        }
+
+    fn with_capacity(size: usize) -> Self {
+        Self::with_capacity(size)
+    }
+
+    fn merge_capacity(cont1: &Self, cont2: &Self) -> Self {
+        Self::with_capacity(cont1.len() + cont2.len())
+    }
+
+    fn index(&self, index: usize) -> Self::ReadItem<'_> {
+        Wrapper(self.index(index))
+    }
+
+    fn len(&self) -> usize {
+        self.len()
     }
 }
 
@@ -278,11 +330,11 @@ pub mod containers {
 
     use timely::container::columnation::{Columnation, TimelyStack};
 
-    use std::borrow::{Borrow, ToOwned};
+    use std::borrow::ToOwned;
     use crate::trace::MyTrait;
 
     /// A general-purpose container resembling `Vec<T>`.
-    pub trait BatchContainer: Default + 'static {
+    pub trait BatchContainer: 'static {
         /// The type of contained item.
         ///
         /// The container only supplies references to the item, so it needn't be sized.
@@ -290,19 +342,23 @@ pub mod containers {
         /// The type that can be read back out of the container.
         type ReadItem<'a>: Copy + MyTrait<'a, Owned = Self::PushItem> + for<'b> PartialOrd<Self::ReadItem<'b>>;
         /// Inserts an owned item.
-        fn push(&mut self, item: Self::PushItem);
+        fn push(&mut self, item: Self::PushItem) {
+            self.copy_push(&item);
+        }
         /// Inserts an owned item.
-        fn copy_push(&mut self, item: &Self::PushItem);
+        fn copy_push(&mut self, item: &Self::PushItem) {
+            self.copy(MyTrait::borrow_as(item));
+        }
         /// Inserts a borrowed item.
         fn copy(&mut self, item: Self::ReadItem<'_>);
-        /// Extends from a slice of items.
-        fn copy_slice(&mut self, slice: &[Self::PushItem]);
         /// Extends from a range of items in another`Self`.
-        fn copy_range(&mut self, other: &Self, start: usize, end: usize);
+        fn copy_range(&mut self, other: &Self, start: usize, end: usize) {
+            for index in start .. end {
+                self.copy(other.index(index));
+            }
+        }
         /// Creates a new container with sufficient capacity.
         fn with_capacity(size: usize) -> Self;
-        /// Reserves additional capacity.
-        fn reserve(&mut self, additional: usize);
         /// Creates a new container with sufficient capacity.
         fn merge_capacity(cont1: &Self, cont2: &Self) -> Self;
 
@@ -319,6 +375,8 @@ pub mod containers {
                 None
             }
         }
+        /// Indicates if the length is zero.
+        fn is_empty(&self) -> bool { self.len() == 0 }
 
         /// Reports the number of elements satisfing the predicate.
         ///
@@ -380,17 +438,11 @@ pub mod containers {
         fn copy(&mut self, item: &T) {
             self.push(item.clone());
         }
-        fn copy_slice(&mut self, slice: &[T]) {
-            self.extend_from_slice(slice);
-        }
         fn copy_range(&mut self, other: &Self, start: usize, end: usize) {
             self.extend_from_slice(&other[start .. end]);
         }
         fn with_capacity(size: usize) -> Self {
             Vec::with_capacity(size)
-        }
-        fn reserve(&mut self, additional: usize) {
-            self.reserve(additional);
         }
         fn merge_capacity(cont1: &Self, cont2: &Self) -> Self {
             Vec::with_capacity(cont1.len() + cont2.len())
@@ -409,20 +461,11 @@ pub mod containers {
         type PushItem = T;
         type ReadItem<'a> = &'a Self::PushItem;
 
-        fn push(&mut self, item: Self::PushItem) {
-            self.copy(item.borrow());
-        }
         fn copy_push(&mut self, item: &Self::PushItem) {
             self.copy(item);
         }
         fn copy(&mut self, item: &T) {
             self.copy(item);
-        }
-        fn copy_slice(&mut self, slice: &[Self::PushItem]) {
-            self.reserve_items(slice.iter());
-            for item in slice.iter() {
-                self.copy(item);
-            }
         }
         fn copy_range(&mut self, other: &Self, start: usize, end: usize) {
             let slice = &other[start .. end];
@@ -433,8 +476,6 @@ pub mod containers {
         }
         fn with_capacity(size: usize) -> Self {
             Self::with_capacity(size)
-        }
-        fn reserve(&mut self, _additional: usize) {
         }
         fn merge_capacity(cont1: &Self, cont2: &Self) -> Self {
             let mut new = Self::default();
@@ -481,11 +522,6 @@ pub mod containers {
             }
             self.offsets.push(self.inner.len());
         }
-        fn copy_slice(&mut self, slice: &[Vec<B>]) {
-            for item in slice {
-                self.copy(item);
-            }
-        }
         fn copy_range(&mut self, other: &Self, start: usize, end: usize) {
             for index in start .. end {
                 self.copy(other.index(index));
@@ -498,8 +534,6 @@ pub mod containers {
                 offsets,
                 inner: Vec::with_capacity(size),
             }
-        }
-        fn reserve(&mut self, _additional: usize) {
         }
         fn merge_capacity(cont1: &Self, cont2: &Self) -> Self {
             let mut offsets = Vec::with_capacity(cont1.inner.len() + cont2.inner.len() + 1);
@@ -588,8 +622,6 @@ pub mod containers {
             }
         }
     }
-    
-    
 
     impl<B> BatchContainer for SliceContainer2<B>
     where
@@ -612,11 +644,6 @@ pub mod containers {
             }
             self.offsets.push(self.inner.len());
         }
-        fn copy_slice(&mut self, slice: &[Vec<B>]) {
-            for item in slice {
-                self.copy_push(item);
-            }
-        }
         fn copy_range(&mut self, other: &Self, start: usize, end: usize) {
             for index in start .. end {
                 self.copy(other.index(index));
@@ -630,8 +657,6 @@ pub mod containers {
                 offsets,
                 inner: Vec::with_capacity(size),
             }
-        }
-        fn reserve(&mut self, _additional: usize) {
         }
         fn merge_capacity(cont1: &Self, cont2: &Self) -> Self {
             let mut offsets = Vec::with_capacity(cont1.inner.len() + cont2.inner.len() + 1);
