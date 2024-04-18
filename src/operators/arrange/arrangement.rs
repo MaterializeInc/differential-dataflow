@@ -19,7 +19,7 @@
 
 use timely::dataflow::operators::{Enter, Map};
 use timely::order::PartialOrder;
-use timely::dataflow::{Scope, Stream};
+use timely::dataflow::{Scope, Stream, StreamCore};
 use timely::dataflow::operators::generic::Operator;
 use timely::dataflow::channels::pact::{ParallelizationContract, Pipeline, Exchange};
 use timely::progress::Timestamp;
@@ -444,7 +444,7 @@ where
         T2::ValOwned: Data,
         T2::Diff: Abelian,
         T2::Batch: Batch,
-        T2::Builder: Builder<Output=T2::Batch, Item = ((T1::KeyOwned, T2::ValOwned), T2::Time, T2::Diff)>,
+        T2::Builder: Builder<Input = ((T1::KeyOwned, T2::ValOwned), T2::Time, T2::Diff)>,
         L: FnMut(T1::Key<'_>, &[(T1::Val<'_>, T1::Diff)], &mut Vec<(<T2::Cursor as Cursor>::ValOwned, T2::Diff)>)+'static,
     {
         self.reduce_core::<_,T2>(name, move |key, input, output, change| {
@@ -462,7 +462,7 @@ where
         T2: for<'a> Trace<Key<'a>=T1::Key<'a>, Time=T1::Time>+'static,
         T2::ValOwned: Data,
         T2::Batch: Batch,
-        T2::Builder: Builder<Output=T2::Batch, Item = ((T1::KeyOwned, T2::ValOwned), T2::Time, T2::Diff)>,
+        T2::Builder: Builder<Input = ((T1::KeyOwned, T2::ValOwned), T2::Time, T2::Diff)>,
         L: FnMut(T1::Key<'_>, &[(T1::Val<'_>, T1::Diff)], &mut Vec<(<T2::Cursor as Cursor>::ValOwned,T2::Diff)>, &mut Vec<(<T2::Cursor as Cursor>::ValOwned, T2::Diff)>)+'static,
     {
         use crate::operators::reduce::reduce_trace;
@@ -489,249 +489,252 @@ where
     }
 }
 
-/// A type that can be arranged as if a collection of updates shaped as `((K,V),G::Timestamp,R)`.
-///
-/// This trait is primarily implemented by `Collection<G,(K,V),R>`.
-///
-/// The resulting arrangements may not present as `((K,V),T,R)`, as their output types are unconstrained.
-/// This allows e.g. for `Vec<u8>` inputs to present as `&[u8]` when read, but that relationship is not
-/// constrained by this trait.
-pub trait Arrange<G, K, V, R>
+/// A type that can be arranged as if a collection of updates.
+pub trait Arrange<G, C>
 where
     G: Scope,
     G::Timestamp: Lattice,
 {
-    /// Arranges a stream of `(Key, Val)` updates by `Key`.
-    ///
-    /// This operator arranges a stream of values into a shared trace, whose contents it maintains.
+    /// Arranges updates into a shared trace.
     fn arrange<Tr>(&self) -> Arranged<G, TraceAgent<Tr>>
     where
         Tr: Trace<Time=G::Timestamp> + 'static,
-        K: ExchangeData + Hashable,
-        V: ExchangeData,
-        R: ExchangeData,
         Tr::Batch: Batch,
-        Tr::Batcher: Batcher<Item = ((K,V),G::Timestamp,R), Time = G::Timestamp>,
-        Tr::Builder: Builder<Item = ((K,V),G::Timestamp,R), Time = G::Timestamp, Output = Tr::Batch>,
+        Tr::Batcher: Batcher<Input=C>,
     {
         self.arrange_named("Arrange")
     }
 
-    /// Arranges a stream of `(Key, Val)` updates by `Key`, and presents with a `name` argument.
-    ///
-    /// This operator arranges a stream of values into a shared trace, whose contents it maintains.
+    /// Arranges updates into a shared trace, with a supplied name.
     fn arrange_named<Tr>(&self, name: &str) -> Arranged<G, TraceAgent<Tr>>
     where
         Tr: Trace<Time=G::Timestamp> + 'static,
-        K: ExchangeData + Hashable,
-        V: ExchangeData,
-        R: ExchangeData,
         Tr::Batch: Batch,
-        Tr::Batcher: Batcher<Item = ((K,V),G::Timestamp,R), Time = G::Timestamp>,
-        Tr::Builder: Builder<Item = ((K,V),G::Timestamp,R), Time = G::Timestamp, Output = Tr::Batch>,
+        Tr::Batcher: Batcher<Input=C>,
+    ;
+
+    /// Arranges updates into a shared trace, using a supplied parallelization contract, with a supplied name.
+    fn arrange_core<P, Tr>(&self, pact: P, name: &str) -> Arranged<G, TraceAgent<Tr>>
+    where
+        P: ParallelizationContract<G::Timestamp, C>,
+        Tr: Trace<Time=G::Timestamp>+'static,
+        Tr::Batch: Batch,
+        Tr::Batcher: Batcher<Input=C>,
+    ;
+}
+
+impl<G, K, V, R> Arrange<G, Vec<((K, V), G::Timestamp, R)>> for Collection<G, (K, V), R>
+where
+    G: Scope,
+    G::Timestamp: Lattice,
+    K: ExchangeData + Hashable,
+    V: ExchangeData,
+    R: ExchangeData + Semigroup,
+{
+    fn arrange_named<Tr>(&self, name: &str) -> Arranged<G, TraceAgent<Tr>>
+    where
+        Tr: Trace<Time=G::Timestamp> + 'static,
+        Tr::Batch: Batch,
+        Tr::Batcher: Batcher<Input=Vec<((K, V), G::Timestamp, R)>>,
     {
         let exchange = Exchange::new(move |update: &((K,V),G::Timestamp,R)| (update.0).0.hashed().into());
         self.arrange_core(exchange, name)
     }
 
-    /// Arranges a stream of `(Key, Val)` updates by `Key`, configured with a name and a parallelization contract.
-    ///
-    /// This operator arranges a stream of values into a shared trace, whose contents it maintains.
-    /// It uses the supplied parallelization contract to distribute the data, which does not need to
-    /// be consistently by key (though this is the most common).
     fn arrange_core<P, Tr>(&self, pact: P, name: &str) -> Arranged<G, TraceAgent<Tr>>
     where
-        P: ParallelizationContract<G::Timestamp, ((K,V),G::Timestamp,R)>,
-        K: Clone,
-        V: Clone,
-        R: Clone,
+        P: ParallelizationContract<G::Timestamp, Vec<((K,V),G::Timestamp,R)>>,
         Tr: Trace<Time=G::Timestamp>+'static,
         Tr::Batch: Batch,
-        Tr::Batcher: Batcher<Item = ((K,V),G::Timestamp,R), Time = G::Timestamp>,
-        Tr::Builder: Builder<Item = ((K,V),G::Timestamp,R), Time = G::Timestamp, Output = Tr::Batch>,
-    ;
-}
-
-impl<G, K, V, R> Arrange<G, K, V, R> for Collection<G, (K, V), R>
-where
-    G: Scope,
-    G::Timestamp: Lattice,
-    K: Clone + 'static,
-    V: Clone + 'static,
-    R: Semigroup,
-{
-    fn arrange_core<P, Tr>(&self, pact: P, name: &str) -> Arranged<G, TraceAgent<Tr>>
-    where
-        P: ParallelizationContract<G::Timestamp, ((K,V),G::Timestamp,R)>,
-        Tr: Trace<Time=G::Timestamp>+'static,
-        Tr::Batch: Batch,
-        Tr::Batcher: Batcher<Item = ((K,V),G::Timestamp,R), Time = G::Timestamp>,
-        Tr::Builder: Builder<Item = ((K,V),G::Timestamp,R), Time = G::Timestamp, Output = Tr::Batch>,
+        Tr::Batcher: Batcher<Input=Vec<((K,V),G::Timestamp,R)>>,
     {
-        // The `Arrange` operator is tasked with reacting to an advancing input
-        // frontier by producing the sequence of batches whose lower and upper
-        // bounds are those frontiers, containing updates at times greater or
-        // equal to lower and not greater or equal to upper.
-        //
-        // The operator uses its batch type's `Batcher`, which accepts update
-        // triples and responds to requests to "seal" batches (presented as new
-        // upper frontiers).
-        //
-        // Each sealed batch is presented to the trace, and if at all possible
-        // transmitted along the outgoing channel. Empty batches may not have
-        // a corresponding capability, as they are only retained for actual data
-        // held by the batcher, which may prevents the operator from sending an
-        // empty batch.
-
-        let mut reader: Option<TraceAgent<Tr>> = None;
-
-        // fabricate a data-parallel operator using the `unary_notify` pattern.
-        let stream = {
-
-            let reader = &mut reader;
-
-            self.inner.unary_frontier(pact, name, move |_capability, info| {
-
-                // Acquire a logger for arrange events.
-                let logger = {
-                    let scope = self.scope();
-                    let register = scope.log_register();
-                    register.get::<crate::logging::DifferentialEvent>("differential/arrange")
-                };
-
-                // Where we will deposit received updates, and from which we extract batches.
-                let mut batcher = Tr::Batcher::new(logger.clone(), info.global_id);
-
-                // Capabilities for the lower envelope of updates in `batcher`.
-                let mut capabilities = Antichain::<Capability<G::Timestamp>>::new();
-
-                let activator = Some(self.scope().activator_for(&info.address[..]));
-                let mut empty_trace = Tr::new(info.clone(), logger.clone(), activator);
-                // If there is default exertion logic set, install it.
-                if let Some(exert_logic) = self.inner.scope().config().get::<trace::ExertionLogic>("differential/default_exert_logic").cloned() {
-                    empty_trace.set_exert_logic(exert_logic);
-                }
-
-                let (reader_local, mut writer) = TraceAgent::new(empty_trace, info, logger);
-
-                *reader = Some(reader_local);
-
-                // Initialize to the minimal input frontier.
-                let mut prev_frontier = Antichain::from_elem(<G::Timestamp as Timestamp>::minimum());
-
-                move |input, output| {
-
-                    // As we receive data, we need to (i) stash the data and (ii) keep *enough* capabilities.
-                    // We don't have to keep all capabilities, but we need to be able to form output messages
-                    // when we realize that time intervals are complete.
-
-                    input.for_each(|cap, data| {
-                        capabilities.insert(cap.retain());
-                        batcher.push_batch(data);
-                    });
-
-                    // The frontier may have advanced by multiple elements, which is an issue because
-                    // timely dataflow currently only allows one capability per message. This means we
-                    // must pretend to process the frontier advances one element at a time, batching
-                    // and sending smaller bites than we might have otherwise done.
-
-                    // Assert that the frontier never regresses.
-                    assert!(PartialOrder::less_equal(&prev_frontier.borrow(), &input.frontier().frontier()));
-
-                    // Test to see if strict progress has occurred, which happens whenever the new
-                    // frontier isn't equal to the previous. It is only in this case that we have any
-                    // data processing to do.
-                    if prev_frontier.borrow() != input.frontier().frontier() {
-                        // There are two cases to handle with some care:
-                        //
-                        // 1. If any held capabilities are not in advance of the new input frontier,
-                        //    we must carve out updates now in advance of the new input frontier and
-                        //    transmit them as batches, which requires appropriate *single* capabilites;
-                        //    Until timely dataflow supports multiple capabilities on messages, at least.
-                        //
-                        // 2. If there are no held capabilities in advance of the new input frontier,
-                        //    then there are no updates not in advance of the new input frontier and
-                        //    we can simply create an empty input batch with the new upper frontier
-                        //    and feed this to the trace agent (but not along the timely output).
-
-                        // If there is at least one capability not in advance of the input frontier ...
-                        if capabilities.elements().iter().any(|c| !input.frontier().less_equal(c.time())) {
-
-                            let mut upper = Antichain::new();   // re-used allocation for sealing batches.
-
-                            // For each capability not in advance of the input frontier ...
-                            for (index, capability) in capabilities.elements().iter().enumerate() {
-
-                                if !input.frontier().less_equal(capability.time()) {
-
-                                    // Assemble the upper bound on times we can commit with this capabilities.
-                                    // We must respect the input frontier, and *subsequent* capabilities, as
-                                    // we are pretending to retire the capability changes one by one.
-                                    upper.clear();
-                                    for time in input.frontier().frontier().iter() {
-                                        upper.insert(time.clone());
-                                    }
-                                    for other_capability in &capabilities.elements()[(index + 1) .. ] {
-                                        upper.insert(other_capability.time().clone());
-                                    }
-
-                                    // Extract updates not in advance of `upper`.
-                                    let batch = batcher.seal::<Tr::Builder>(upper.clone());
-
-                                    writer.insert(batch.clone(), Some(capability.time().clone()));
-
-                                    // send the batch to downstream consumers, empty or not.
-                                    output.session(&capabilities.elements()[index]).give(batch);
-                                }
-                            }
-
-                            // Having extracted and sent batches between each capability and the input frontier,
-                            // we should downgrade all capabilities to match the batcher's lower update frontier.
-                            // This may involve discarding capabilities, which is fine as any new updates arrive
-                            // in messages with new capabilities.
-
-                            let mut new_capabilities = Antichain::new();
-                            for time in batcher.frontier().iter() {
-                                if let Some(capability) = capabilities.elements().iter().find(|c| c.time().less_equal(time)) {
-                                    new_capabilities.insert(capability.delayed(time));
-                                }
-                                else {
-                                    panic!("failed to find capability");
-                                }
-                            }
-
-                            capabilities = new_capabilities;
-                        }
-                        else {
-                            // Announce progress updates, even without data.
-                            let _batch = batcher.seal::<Tr::Builder>(input.frontier().frontier().to_owned());
-                            writer.seal(input.frontier().frontier().to_owned());
-                        }
-
-                        prev_frontier.clear();
-                        prev_frontier.extend(input.frontier().frontier().iter().cloned());
-                    }
-
-                    writer.exert();
-                }
-            })
-        };
-
-        Arranged { stream, trace: reader.unwrap() }
+        arrange_core(&self.inner, pact, name)
     }
 }
 
-impl<G: Scope, K: ExchangeData+Hashable, R: ExchangeData+Semigroup> Arrange<G, K, (), R> for Collection<G, K, R>
+/// Arranges a stream of updates by a key, configured with a name and a parallelization contract.
+///
+/// This operator arranges a stream of values into a shared trace, whose contents it maintains.
+/// It uses the supplied parallelization contract to distribute the data, which does not need to
+/// be consistently by key (though this is the most common).
+fn arrange_core<G, P, Tr>(stream: &StreamCore<G, <Tr::Batcher as Batcher>::Input>, pact: P, name: &str) -> Arranged<G, TraceAgent<Tr>>
+where
+    G: Scope,
+    G::Timestamp: Lattice,
+    P: ParallelizationContract<G::Timestamp, <Tr::Batcher as Batcher>::Input>,
+    Tr: Trace<Time=G::Timestamp>+'static,
+    Tr::Batch: Batch,
+    <Tr::Batcher as Batcher>::Input: timely::Container,
+{
+    // The `Arrange` operator is tasked with reacting to an advancing input
+    // frontier by producing the sequence of batches whose lower and upper
+    // bounds are those frontiers, containing updates at times greater or
+    // equal to lower and not greater or equal to upper.
+    //
+    // The operator uses its batch type's `Batcher`, which accepts update
+    // triples and responds to requests to "seal" batches (presented as new
+    // upper frontiers).
+    //
+    // Each sealed batch is presented to the trace, and if at all possible
+    // transmitted along the outgoing channel. Empty batches may not have
+    // a corresponding capability, as they are only retained for actual data
+    // held by the batcher, which may prevents the operator from sending an
+    // empty batch.
+
+    let mut reader: Option<TraceAgent<Tr>> = None;
+
+    // fabricate a data-parallel operator using the `unary_notify` pattern.
+    let reader_ref = &mut reader;
+    let scope = stream.scope();
+
+    let stream = stream.unary_frontier(pact, name, move |_capability, info| {
+
+        // Acquire a logger for arrange events.
+        let logger = {
+            let register = scope.log_register();
+            register.get::<crate::logging::DifferentialEvent>("differential/arrange")
+        };
+
+        // Where we will deposit received updates, and from which we extract batches.
+        let mut batcher = Tr::Batcher::new(logger.clone(), info.global_id);
+
+        // Capabilities for the lower envelope of updates in `batcher`.
+        let mut capabilities = Antichain::<Capability<G::Timestamp>>::new();
+
+        let activator = Some(scope.activator_for(&info.address[..]));
+        let mut empty_trace = Tr::new(info.clone(), logger.clone(), activator);
+        // If there is default exertion logic set, install it.
+        if let Some(exert_logic) = scope.config().get::<trace::ExertionLogic>("differential/default_exert_logic").cloned() {
+            empty_trace.set_exert_logic(exert_logic);
+        }
+
+        let (reader_local, mut writer) = TraceAgent::new(empty_trace, info, logger);
+
+        *reader_ref = Some(reader_local);
+
+        // Initialize to the minimal input frontier.
+        let mut prev_frontier = Antichain::from_elem(<G::Timestamp as Timestamp>::minimum());
+
+        move |input, output| {
+
+            // As we receive data, we need to (i) stash the data and (ii) keep *enough* capabilities.
+            // We don't have to keep all capabilities, but we need to be able to form output messages
+            // when we realize that time intervals are complete.
+
+            input.for_each(|cap, data| {
+                capabilities.insert(cap.retain());
+                batcher.push_batch(data);
+            });
+
+            // The frontier may have advanced by multiple elements, which is an issue because
+            // timely dataflow currently only allows one capability per message. This means we
+            // must pretend to process the frontier advances one element at a time, batching
+            // and sending smaller bites than we might have otherwise done.
+
+            // Assert that the frontier never regresses.
+            assert!(PartialOrder::less_equal(&prev_frontier.borrow(), &input.frontier().frontier()));
+
+            // Test to see if strict progress has occurred, which happens whenever the new
+            // frontier isn't equal to the previous. It is only in this case that we have any
+            // data processing to do.
+            if prev_frontier.borrow() != input.frontier().frontier() {
+                // There are two cases to handle with some care:
+                //
+                // 1. If any held capabilities are not in advance of the new input frontier,
+                //    we must carve out updates now in advance of the new input frontier and
+                //    transmit them as batches, which requires appropriate *single* capabilites;
+                //    Until timely dataflow supports multiple capabilities on messages, at least.
+                //
+                // 2. If there are no held capabilities in advance of the new input frontier,
+                //    then there are no updates not in advance of the new input frontier and
+                //    we can simply create an empty input batch with the new upper frontier
+                //    and feed this to the trace agent (but not along the timely output).
+
+                // If there is at least one capability not in advance of the input frontier ...
+                if capabilities.elements().iter().any(|c| !input.frontier().less_equal(c.time())) {
+
+                    let mut upper = Antichain::new();   // re-used allocation for sealing batches.
+
+                    // For each capability not in advance of the input frontier ...
+                    for (index, capability) in capabilities.elements().iter().enumerate() {
+
+                        if !input.frontier().less_equal(capability.time()) {
+
+                            // Assemble the upper bound on times we can commit with this capabilities.
+                            // We must respect the input frontier, and *subsequent* capabilities, as
+                            // we are pretending to retire the capability changes one by one.
+                            upper.clear();
+                            for time in input.frontier().frontier().iter() {
+                                upper.insert(time.clone());
+                            }
+                            for other_capability in &capabilities.elements()[(index + 1) .. ] {
+                                upper.insert(other_capability.time().clone());
+                            }
+
+                            // Extract updates not in advance of `upper`.
+                            let batch = batcher.seal::<Tr::Builder>(upper.clone());
+
+                            writer.insert(batch.clone(), Some(capability.time().clone()));
+
+                            // send the batch to downstream consumers, empty or not.
+                            output.session(&capabilities.elements()[index]).give(batch);
+                        }
+                    }
+
+                    // Having extracted and sent batches between each capability and the input frontier,
+                    // we should downgrade all capabilities to match the batcher's lower update frontier.
+                    // This may involve discarding capabilities, which is fine as any new updates arrive
+                    // in messages with new capabilities.
+
+                    let mut new_capabilities = Antichain::new();
+                    for time in batcher.frontier().iter() {
+                        if let Some(capability) = capabilities.elements().iter().find(|c| c.time().less_equal(time)) {
+                            new_capabilities.insert(capability.delayed(time));
+                        }
+                        else {
+                            panic!("failed to find capability");
+                        }
+                    }
+
+                    capabilities = new_capabilities;
+                }
+                else {
+                    // Announce progress updates, even without data.
+                    let _batch = batcher.seal::<Tr::Builder>(input.frontier().frontier().to_owned());
+                    writer.seal(input.frontier().frontier().to_owned());
+                }
+
+                prev_frontier.clear();
+                prev_frontier.extend(input.frontier().frontier().iter().cloned());
+            }
+
+            writer.exert();
+        }
+    });
+
+    Arranged { stream, trace: reader.unwrap() }
+}
+
+impl<G: Scope, K: ExchangeData+Hashable, R: ExchangeData+Semigroup> Arrange<G, Vec<((K, ()), G::Timestamp, R)>> for Collection<G, K, R>
 where
     G::Timestamp: Lattice+Ord,
 {
+    fn arrange_named<Tr>(&self, name: &str) -> Arranged<G, TraceAgent<Tr>>
+    where
+        Tr: Trace<Time=G::Timestamp> + 'static,
+        Tr::Batch: Batch,
+        Tr::Batcher: Batcher<Input=Vec<((K, ()), G::Timestamp, R)>>,
+    {
+        let exchange = Exchange::new(move |update: &((K,()),G::Timestamp,R)| (update.0).0.hashed().into());
+        self.arrange_core(exchange, name)
+    }
+
     fn arrange_core<P, Tr>(&self, pact: P, name: &str) -> Arranged<G, TraceAgent<Tr>>
     where
-        P: ParallelizationContract<G::Timestamp, ((K,()),G::Timestamp,R)>,
+        P: ParallelizationContract<G::Timestamp, Vec<((K,()),G::Timestamp,R)>>,
         Tr: Trace<Time=G::Timestamp>+'static,
         Tr::Batch: Batch,
-        Tr::Batcher: Batcher<Item = ((K,()),G::Timestamp,R), Time = G::Timestamp>,
-        Tr::Builder: Builder<Item = ((K,()),G::Timestamp,R), Time = G::Timestamp, Output = Tr::Batch>,
+        Tr::Batcher: Batcher<Input=Vec<((K,()),G::Timestamp,R)>>,
     {
         self.map(|k| (k, ()))
             .arrange_core(pact, name)
