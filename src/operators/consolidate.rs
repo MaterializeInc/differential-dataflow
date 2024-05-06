@@ -51,7 +51,7 @@ where
     /// As `consolidate` but with the ability to name the operator and specify the trace type.
     pub fn consolidate_named<Tr>(&self, name: &str) -> Self
     where
-        Tr: crate::trace::Trace<KeyOwned = D,ValOwned = (),Time=G::Timestamp,Diff=R>+'static,
+        Tr: crate::trace::Trace<KeyOwned = D,Time=G::Timestamp,Diff=R>+'static,
         Tr::Batch: crate::trace::Batch,
         Tr::Batcher: Batcher<Input=Vec<((D,()),G::Timestamp,R)>>,
     {
@@ -99,7 +99,7 @@ where
                     input.for_each(|time, data| {
                         data.swap(&mut vector);
                         crate::consolidation::consolidate_updates(&mut vector);
-                        output.session(&time).give_vec(&mut vector);
+                        output.session(&time).give_container(&mut vector);
                     })
                 }
             })
