@@ -138,7 +138,7 @@ where
     F: Fn(Tr::Val<'_>) -> V + 'static,
     Tr::Time: TotalOrder+ExchangeData,
     Tr::Batch: Batch,
-    Tr::Builder: Builder<Input = ((Tr::KeyOwned, V), Tr::Time, Tr::Diff)>,
+    Tr::Builder: Builder<Input = Vec<((Tr::KeyOwned, V), Tr::Time, Tr::Diff)>>,
 {
     let mut reader: Option<TraceAgent<Tr>> = None;
 
@@ -244,14 +244,14 @@ where
                                 let mut builder = Tr::Builder::new();
                                 for (key, mut list) in to_process.drain(..) {
 
-                                    use trace::cursor::MyTrait;
+                                    use trace::cursor::IntoOwned;
 
                                     // The prior value associated with the key.
                                     let mut prev_value: Option<V> = None;
 
                                     // Attempt to find the key in the trace.
-                                    trace_cursor.seek_key_owned(&trace_storage, &key);
-                                    if trace_cursor.get_key(&trace_storage).map(|k| k.equals(&key)).unwrap_or(false) {
+                                    trace_cursor.seek_key(&trace_storage, IntoOwned::borrow_as(&key));
+                                    if trace_cursor.get_key(&trace_storage).map(|k| k.eq(&IntoOwned::borrow_as(&key))).unwrap_or(false) {
                                         // Determine the prior value associated with the key.
                                         while let Some(val) = trace_cursor.get_val(&trace_storage) {
                                             let mut count = 0;
@@ -282,9 +282,7 @@ where
                                     }
                                     // Must insert updates in (key, val, time) order.
                                     updates.sort();
-                                    for update in updates.drain(..) {
-                                        builder.push(update);
-                                    }
+                                    builder.push(&mut updates);
                                 }
                                 let batch = builder.done(prev_frontier.clone(), upper.clone(), Antichain::from_elem(G::Timestamp::minimum()));
                                 prev_frontier.clone_from(&upper);

@@ -19,7 +19,7 @@ use timely::progress::{Antichain, frontier::AntichainRef};
 use timely::progress::Timestamp;
 
 use crate::logging::DifferentialEvent;
-use crate::trace::cursor::MyTrait;
+use crate::trace::cursor::IntoOwned;
 use crate::difference::Semigroup;
 use crate::lattice::Lattice;
 // use ::difference::Semigroup;
@@ -52,11 +52,11 @@ pub type ExertionLogic = std::sync::Arc<dyn for<'a> Fn(&'a [(usize, usize, usize
 pub trait TraceReader {
 
     /// Key by which updates are indexed.
-    type Key<'a>: Copy + Clone + MyTrait<'a, Owned = Self::KeyOwned>;
+    type Key<'a>: Copy + Clone + Ord + IntoOwned<'a, Owned = Self::KeyOwned>;
     /// Owned version of the above.
     type KeyOwned: Ord + Clone;
     /// Values associated with keys.
-    type Val<'a>: Copy + Clone + MyTrait<'a>;
+    type Val<'a>: Copy + Clone + IntoOwned<'a>;
     /// Timestamps associated with updates
     type Time: Timestamp + Lattice + Ord + Clone;
     /// Associated update.
@@ -258,11 +258,11 @@ where
     Self: ::std::marker::Sized,
 {
     /// Key by which updates are indexed.
-    type Key<'a>: Copy + Clone + MyTrait<'a, Owned = Self::KeyOwned>;
+    type Key<'a>: Copy + Clone + Ord + IntoOwned<'a, Owned = Self::KeyOwned>;
     /// Owned version of the above.
     type KeyOwned: Ord + Clone;
     /// Values associated with keys.
-    type Val<'a>: Copy + Clone + MyTrait<'a>;
+    type Val<'a>: Copy + Clone + IntoOwned<'a>;
     /// Timestamps associated with updates
     type Time: Timestamp + Lattice + Ord + Clone;
     /// Associated update.
@@ -336,15 +336,10 @@ pub trait Builder: Sized {
     ///
     /// They represent respectively the number of distinct `key`, `(key, val)`, and total updates.
     fn with_capacity(keys: usize, vals: usize, upds: usize) -> Self;
-    /// Adds an element to the batch.
+    /// Adds a chunk of elements to the batch.
     ///
-    /// The default implementation uses `self.copy` with references to the owned arguments.
-    /// One should override it if the builder can take advantage of owned arguments.
-    fn push(&mut self, element: Self::Input) {
-        self.copy(&element);
-    }
-    /// Adds an element to the batch.
-    fn copy(&mut self, element: &Self::Input);
+    /// Adds all elements from `chunk` to the builder and leaves `chunk` in an undefined state.
+    fn push(&mut self, chunk: &mut Self::Input);
     /// Completes building and returns the batch.
     fn done(self, lower: Antichain<Self::Time>, upper: Antichain<Self::Time>, since: Antichain<Self::Time>) -> Self::Output;
 }
@@ -454,8 +449,7 @@ pub mod rc_blanket_impls {
         type Time = B::Time;
         type Output = Rc<B::Output>;
         fn with_capacity(keys: usize, vals: usize, upds: usize) -> Self { RcBuilder { builder: B::with_capacity(keys, vals, upds) } }
-        fn push(&mut self, element: Self::Input) { self.builder.push(element) }
-        fn copy(&mut self, element: &Self::Input) { self.builder.copy(element) }
+        fn push(&mut self, input: &mut Self::Input) { self.builder.push(input) }
         fn done(self, lower: Antichain<Self::Time>, upper: Antichain<Self::Time>, since: Antichain<Self::Time>) -> Rc<B::Output> { Rc::new(self.builder.done(lower, upper, since)) }
     }
 
@@ -561,8 +555,7 @@ pub mod abomonated_blanket_impls {
         type Time = B::Time;
         type Output = Abomonated<B::Output, Vec<u8>>;
         fn with_capacity(keys: usize, vals: usize, upds: usize) -> Self { AbomonatedBuilder { builder: B::with_capacity(keys, vals, upds) } }
-        fn push(&mut self, element: Self::Input) { self.builder.push(element) }
-        fn copy(&mut self, element: &Self::Input) { self.builder.copy(element) }
+        fn push(&mut self, input: &mut Self::Input) { self.builder.push(input) }
         fn done(self, lower: Antichain<Self::Time>, upper: Antichain<Self::Time>, since: Antichain<Self::Time>) -> Self::Output {
             let batch = self.builder.done(lower, upper, since);
             let mut bytes = Vec::with_capacity(measure(&batch));

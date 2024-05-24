@@ -5,6 +5,8 @@
 //! to the key and the list of values.
 //! The function is expected to populate a list of output values.
 
+use timely::Container;
+use timely::container::PushInto;
 use crate::hashable::Hashable;
 use crate::{Data, ExchangeData, Collection};
 use crate::difference::{Semigroup, Abelian};
@@ -252,7 +254,7 @@ pub trait ReduceCore<G: Scope, K: ToOwned + ?Sized, V: Data, R: Semigroup> where
             F: Fn(T2::Val<'_>) -> V + 'static,
             T2::Diff: Abelian,
             T2::Batch: Batch,
-            T2::Builder: Builder<Input = ((K::Owned, V), T2::Time, T2::Diff)>,
+            T2::Builder: Builder<Input = Vec<((K::Owned, V), T2::Time, T2::Diff)>>,
             L: FnMut(&K, &[(&V, R)], &mut Vec<(V, T2::Diff)>)+'static,
         {
             self.reduce_core::<_,_,T2>(name, from, move |key, input, output, change| {
@@ -274,7 +276,7 @@ pub trait ReduceCore<G: Scope, K: ToOwned + ?Sized, V: Data, R: Semigroup> where
             T2: for<'a> Trace<Key<'a>=&'a K, Time=G::Timestamp>+'static,
             F: Fn(T2::Val<'_>) -> V + 'static,
             T2::Batch: Batch,
-            T2::Builder: Builder<Input = ((K::Owned, V), T2::Time, T2::Diff)>,
+            T2::Builder: Builder<Input = Vec<((K::Owned, V), T2::Time, T2::Diff)>>,
             L: FnMut(&K, &[(&V, R)], &mut Vec<(V,T2::Diff)>, &mut Vec<(V, T2::Diff)>)+'static,
             ;
 }
@@ -293,7 +295,7 @@ where
             F: Fn(T2::Val<'_>) -> V + 'static,
             T2: for<'a> Trace<Key<'a>=&'a K, Time=G::Timestamp>+'static,
             T2::Batch: Batch,
-            T2::Builder: Builder<Input = ((K, V), T2::Time, T2::Diff)>,
+            T2::Builder: Builder<Input = Vec<((K, V), T2::Time, T2::Diff)>>,
             L: FnMut(&K, &[(&V, R)], &mut Vec<(V,T2::Diff)>, &mut Vec<(V, T2::Diff)>)+'static,
     {
         self.arrange_by_key_named(&format!("Arrange: {}", name))
@@ -312,7 +314,8 @@ where
     V: Data,
     F: Fn(T2::Val<'_>) -> V + 'static,
     T2::Batch: Batch,
-    T2::Builder: Builder<Input = ((T1::KeyOwned, V), T2::Time, T2::Diff)>,
+    <T2::Builder as Builder>::Input: Container,
+    ((T1::KeyOwned, V), T2::Time, T2::Diff): PushInto<<T2::Builder as Builder>::Input>,
     L: FnMut(T1::Key<'_>, &[(T1::Val<'_>, T1::Diff)], &mut Vec<(V,T2::Diff)>, &mut Vec<(V, T2::Diff)>)+'static,
 {
     let mut result_trace = None;
@@ -454,6 +457,8 @@ where
                             builders.push(T2::Builder::new());
                         }
 
+                        let mut buffer = Default::default();
+
                         // cursors for navigating input and output traces.
                         let (mut source_cursor, source_storage): (T1::Cursor, _) = source_trace.cursor_through(lower_limit.borrow()).expect("failed to acquire source cursor");
                         let source_storage = &source_storage;
@@ -473,10 +478,10 @@ where
                         while batch_cursor.key_valid(batch_storage) || exposed_position < exposed.len() {
 
                             use std::borrow::Borrow;
-                            use crate::trace::cursor::MyTrait;
+                            use crate::trace::cursor::IntoOwned;
 
                             // Determine the next key we will work on; could be synthetic, could be from a batch.
-                            let key1 = exposed.get(exposed_position).map(|x| <_ as MyTrait>::borrow_as(&x.0));
+                            let key1 = exposed.get(exposed_position).map(|x| <_ as IntoOwned>::borrow_as(&x.0));
                             let key2 = batch_cursor.get_key(batch_storage);
                             let key = match (key1, key2) {
                                 (Some(key1), Some(key2)) => ::std::cmp::min(key1, key2),
@@ -492,7 +497,7 @@ where
                             interesting_times.clear();
 
                             // Populate `interesting_times` with synthetic interesting times (below `upper_limit`) for this key.
-                            while exposed.get(exposed_position).map(|x| x.0.borrow()).map(|k| key.equals(k)).unwrap_or(false) {
+                            while exposed.get(exposed_position).map(|x| x.0.borrow()).map(|k| key.eq(&<T1::Key<'_> as IntoOwned>::borrow_as(&k))).unwrap_or(false) {
                                 interesting_times.push(exposed[exposed_position].1.clone());
                                 exposed_position += 1;
                             }
@@ -531,7 +536,9 @@ where
                             for index in 0 .. buffers.len() {
                                 buffers[index].1.sort_by(|x,y| x.0.cmp(&y.0));
                                 for (val, time, diff) in buffers[index].1.drain(..) {
-                                    builders[index].push(((key.into_owned(), val), time, diff));
+                                    ((key.into_owned(), val), time, diff).push_into(&mut buffer);
+                                    builders[index].push(&mut buffer);
+                                    buffer.clear();
                                 }
                             }
                         }
@@ -648,7 +655,7 @@ where
     where
         F: Fn(C2::Val<'_>) -> V,
         L: FnMut(
-            C1::Key<'a>, 
+            C1::Key<'a>,
             &[(C1::Val<'a>, C1::Diff)],
             &mut Vec<(V, C2::Diff)>,
             &mut Vec<(V, C2::Diff)>,
@@ -728,7 +735,7 @@ mod history_replay {
         where
             F: Fn(C2::Val<'_>) -> V,
             L: FnMut(
-                C1::Key<'a>, 
+                C1::Key<'a>,
                 &[(C1::Val<'a>, C1::Diff)],
                 &mut Vec<(V, C2::Diff)>,
                 &mut Vec<(V, C2::Diff)>,
@@ -1020,7 +1027,7 @@ mod history_replay {
                     new_interesting.push(next_time.clone());
                     debug_assert!(outputs.iter().any(|(t,_)| t.less_equal(&next_time)))
                 }
-            
+
 
                 // Update `meet` to track the meet of each source of times.
                 meet = None;//T::maximum();

@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::cmp::Ordering;
 
 use abomonation_derive::Abomonation;
+use timely::container::columnation::TimelyStack;
 
 use crate::Hashable;
 use crate::trace::implementations::merge_batcher::{MergeBatcher, VecMerger};
@@ -24,7 +25,7 @@ use self::val_batch::{RhhValBatch, RhhValBuilder};
 pub type VecSpine<K, V, T, R> = Spine<
     Rc<RhhValBatch<Vector<((K,V),T,R)>>>,
     MergeBatcher<VecMerger<((K, V), T, R)>, T>,
-    RcBuilder<RhhValBuilder<Vector<((K,V),T,R)>>>,
+    RcBuilder<RhhValBuilder<Vector<((K,V),T,R)>, Vec<((K,V),T,R)>>>,
 >;
 // /// A trace implementation for empty values using a spine of ordered lists.
 // pub type OrdKeySpine<K, T, R> = Spine<Rc<OrdKeyBatch<Vector<((K,()),T,R)>>>>;
@@ -33,7 +34,7 @@ pub type VecSpine<K, V, T, R> = Spine<
 pub type ColSpine<K, V, T, R> = Spine<
     Rc<RhhValBatch<TStack<((K,V),T,R)>>>,
     MergeBatcher<ColumnationMerger<((K,V),T,R)>, T>,
-    RcBuilder<RhhValBuilder<TStack<((K,V),T,R)>>>,
+    RcBuilder<RhhValBuilder<TStack<((K,V),T,R)>, TimelyStack<((K,V),T,R)>>>,
 >;
 // /// A trace implementation backed by columnar storage.
 // pub type ColKeySpine<K, T, R> = Spine<Rc<OrdKeyBatch<TStack<((K,()),T,R)>>>>;
@@ -68,24 +69,33 @@ where <T as Hashable>::Output: PartialOrd {
 
 impl<T: std::hash::Hash + Hashable> HashOrdered for HashWrapper<T> { }
 
-impl<T: std::hash::Hash + Hashable> Hashable for HashWrapper<T> { 
+impl<T: std::hash::Hash + Hashable> Hashable for HashWrapper<T> {
+    type Output = T::Output;
+    fn hashed(&self) -> Self::Output { self.inner.hashed() }
+}
+
+impl<T: std::hash::Hash + Hashable> HashOrdered for &HashWrapper<T> { }
+
+impl<T: std::hash::Hash + Hashable> Hashable for &HashWrapper<T> {
     type Output = T::Output;
     fn hashed(&self) -> Self::Output { self.inner.hashed() }
 }
 
 mod val_batch {
 
-    use std::borrow::Borrow;
     use std::convert::TryInto;
     use std::marker::PhantomData;
     use abomonation_derive::Abomonation;
+    use timely::container::PushInto;
     use timely::progress::{Antichain, frontier::AntichainRef};
 
     use crate::hashable::Hashable;
 
+    use crate::trace::implementations::containers::Push;
+
     use crate::trace::{Batch, BatchReader, Builder, Cursor, Description, Merger};
-    use crate::trace::implementations::BatchContainer;
-    use crate::trace::cursor::MyTrait;
+    use crate::trace::implementations::{BatchContainer, BuilderInput};
+    use crate::trace::cursor::IntoOwned;
 
     use super::{Layout, Update, HashOrdered};
 
@@ -113,7 +123,9 @@ mod val_batch {
         /// would most like to end up. The `BatchContainer` trait does not provide a `capacity()` method,
         /// otherwise we would just use that.
         pub key_capacity: usize,
-        pub divisor: usize,
+        /// A number large enough that when it divides any `u64` the result is at most `self.key_capacity`.
+        /// When that capacity is zero or one, this is set to zero instead.
+        pub divisor: u64,
         /// The number of present keys, distinct from `keys.len()` which contains 
         pub key_count: usize,
 
@@ -172,8 +184,8 @@ mod val_batch {
         /// If `offset` is specified, we will insert it at the appropriate location. If it is not specified,
         /// we leave `keys_offs` ready to receive it as the next `push`. This is so that builders that may
         /// not know the final offset at the moment of key insertion can prepare for receiving the offset.
-        fn insert_key(&mut self, key: &<L::Target as Update>::Key, offset: Option<usize>) {
-            let desired = self.desired_location(key);
+        fn insert_key(&mut self, key: <L::Target as Update>::Key, offset: Option<usize>) {
+            let desired = self.desired_location(&key);
             // Were we to push the key now, it would be at `self.keys.len()`, so while that is wrong, 
             // push additional blank entries in.
             while self.keys.len() < desired {
@@ -185,7 +197,7 @@ mod val_batch {
 
             // Now we insert the key. Even if it is no longer the desired location because of contention.
             // If an offset has been supplied we insert it, and otherwise leave it for future determination.
-            self.keys.copy_push(key);
+            self.keys.push(key);
             if let Some(offset) = offset {
                 self.keys_offs.push(offset);
             }
@@ -194,8 +206,10 @@ mod val_batch {
 
         /// Indicates both the desired location and the hash signature of the key.
         fn desired_location<K: Hashable>(&self, key: &K) -> usize {
-            let hash: usize = key.hashed().into().try_into().unwrap();
-            hash / self.divisor
+            if self.divisor == 0 { 0 }
+            else {
+                (key.hashed().into() / self.divisor).try_into().expect("divisor not large enough to force u64 into uisze")
+            }
         }
 
         /// Returns true if one should advance one's index in the search for `key`.
@@ -216,11 +230,15 @@ mod val_batch {
             }
         }
 
-        // I hope this works out; meant to be 2^64 / self.key_capacity, so that dividing
-        // `signature` by this gives something in `[0, self.key_capacity)`. We could also
-        // do powers of two and just make this really easy.
-        fn divisor_for_capacity(capacity: usize) -> usize {
-            if capacity == 0 { 0 } 
+        /// A value large enough that any `u64` divided by it is less than `capacity`.
+        ///
+        /// This is `2^64 / capacity`, except in the cases where `capacity` is zero or one.
+        /// In those cases, we'll return `0` to communicate the exception, for which we should
+        /// just return `0` when announcing a target location (and a zero capacity that we insert
+        /// into becomes a bug).
+        fn divisor_for_capacity(capacity: usize) -> u64 {
+            let capacity: u64 = capacity.try_into().expect("usize exceeds u64");
+            if capacity == 0 || capacity == 1 { 0 }
             else {
                 ((1 << 63) / capacity) << 1
             }
@@ -303,8 +321,6 @@ mod val_batch {
         /// description
         description: Description<<L::Target as Update>::Time>,
 
-        /// Owned key for copying into.
-        key_owned: <<L::Target as Update>::Key as ToOwned>::Owned,
         /// Local stash of updates, to use for consolidation.
         ///
         /// We could emulate a `ChangeBatch` here, with related compaction smarts.
@@ -358,7 +374,6 @@ mod val_batch {
                 key_cursor2: 0,
                 result: storage,
                 description,
-                key_owned: Default::default(),
                 update_stash: Vec::new(),
                 singletons: 0,
             }
@@ -434,8 +449,7 @@ mod val_batch {
 
             // If we have pushed any values, copy the key as well.
             if self.result.vals.len() > init_vals {
-                source.keys.index(cursor).clone_onto(&mut self.key_owned);
-                self.result.insert_key(&self.key_owned, Some(self.result.vals.len()));
+                self.result.insert_key(source.keys.index(cursor).into_owned(), Some(self.result.vals.len()));
             }           
         }
         /// Merge the next key in each of `source1` and `source2` into `self`, updating the appropriate cursors.
@@ -455,8 +469,7 @@ mod val_batch {
                     let (lower1, upper1) = source1.values_for_key(self.key_cursor1);
                     let (lower2, upper2) = source2.values_for_key(self.key_cursor2);
                     if let Some(off) = self.merge_vals((source1, lower1, upper1), (source2, lower2, upper2)) {
-                        source1.keys.index(self.key_cursor1).clone_onto(&mut self.key_owned);
-                        self.result.insert_key(&self.key_owned, Some(off));
+                        self.result.insert_key(source1.keys.index(self.key_cursor1).into_owned(), Some(off));
                     }
                     // Increment cursors in either case; the keys are merged.
                     self.key_cursor1 += 1;
@@ -561,7 +574,7 @@ mod val_batch {
             if !self.update_stash.is_empty() {
                 // If there is a single element, equal to a just-prior recorded update,
                 // we push nothing and report an unincremented offset to encode this case.
-                if self.update_stash.len() == 1 && self.result.updates.last().map(|l| l.equals(self.update_stash.last().unwrap())).unwrap_or(false) {
+                if self.update_stash.len() == 1 && self.result.updates.last().map(|l| l.eq(IntoOwned::borrow_as(self.update_stash.last().unwrap()))).unwrap_or(false) {
                     // Just clear out update_stash, as we won't drain it here.
                     self.update_stash.clear();
                     self.singletons += 1;
@@ -680,7 +693,7 @@ mod val_batch {
     }
 
     /// A builder for creating layers from unsorted update tuples.
-    pub struct RhhValBuilder<L: Layout> 
+    pub struct RhhValBuilder<L: Layout, CI>
     where 
         <L::Target as Update>::Key: Default + HashOrdered,
     {
@@ -691,9 +704,10 @@ mod val_batch {
         /// This number allows us to correctly gauge the total number of updates reflected in a batch,
         /// even though `updates.len()` may be much shorter than this amount.
         singletons: usize,
+        _marker: PhantomData<CI>,
     }
 
-    impl<L: Layout> RhhValBuilder<L> 
+    impl<L: Layout, CI> RhhValBuilder<L, CI>
     where 
         <L::Target as Update>::Key: Default + HashOrdered,
     {
@@ -724,12 +738,14 @@ mod val_batch {
         }
     }
 
-    impl<L: Layout> Builder for RhhValBuilder<L>
+    impl<L: Layout, CI> Builder for RhhValBuilder<L, CI>
     where
         <L::Target as Update>::Key: Default + HashOrdered,
         // RhhValBatch<L>: Batch<Key=<L::Target as Update>::Key, Val=<L::Target as Update>::Val, Time=<L::Target as Update>::Time, Diff=<L::Target as Update>::Diff>,
+        CI: for<'a> BuilderInput<L, Key<'a> = <L::Target as Update>::Key, Time=<L::Target as Update>::Time, Diff=<L::Target as Update>::Diff>,
+        for<'a> CI::Val<'a>: PushInto<L::ValContainer>,
     {
-        type Input = ((<L::Target as Update>::Key, <L::Target as Update>::Val), <L::Target as Update>::Time, <L::Target as Update>::Diff);
+        type Input = CI;
         type Time = <L::Target as Update>::Time;
         type Output = RhhValBatch<L>;
 
@@ -757,64 +773,36 @@ mod val_batch {
                 },
                 singleton: None,
                 singletons: 0,
+                _marker: PhantomData,
             }
         }
 
         #[inline]
-        fn push(&mut self, ((key, val), time, diff): Self::Input) {
-
-            // Perhaps this is a continuation of an already received key.
-            if self.result.keys.last().map(|k| k.equals(&key)).unwrap_or(false) {
-                // Perhaps this is a continuation of an already received value.
-                if self.result.vals.last().map(|v| v.equals(&val)).unwrap_or(false) {
-                    self.push_update(time, diff);
+        fn push(&mut self, chunk: &mut Self::Input) {
+            for item in chunk.drain() {
+                let (key, val, time, diff) = CI::into_parts(item);
+                // Perhaps this is a continuation of an already received key.
+                if self.result.keys.last().map(|k| CI::key_eq(&key, k)).unwrap_or(false) {
+                    // Perhaps this is a continuation of an already received value.
+                    if self.result.vals.last().map(|v| CI::val_eq(&val, v)).unwrap_or(false) {
+                        self.push_update(time, diff);
+                    } else {
+                        // New value; complete representation of prior value.
+                        self.result.vals_offs.push(self.result.updates.len());
+                        if self.singleton.take().is_some() { self.singletons += 1; }
+                        self.push_update(time, diff);
+                        val.push_into(&mut self.result.vals);
+                    }
                 } else {
-                    // New value; complete representation of prior value.
+                    // New key; complete representation of prior key.
                     self.result.vals_offs.push(self.result.updates.len());
                     if self.singleton.take().is_some() { self.singletons += 1; }
+                    self.result.keys_offs.push(self.result.vals.len());
                     self.push_update(time, diff);
-                    self.result.vals.push(val);
+                    val.push_into(&mut self.result.vals);
+                    // Insert the key, but with no specified offset.
+                    self.result.insert_key(key, None);
                 }
-            } else {
-                // New key; complete representation of prior key.
-                self.result.vals_offs.push(self.result.updates.len());
-                if self.singleton.take().is_some() { self.singletons += 1; }
-                self.result.keys_offs.push(self.result.vals.len());
-                self.push_update(time, diff);
-                self.result.vals.push(val);
-                // Insert the key, but with no specified offset.
-                self.result.insert_key(key.borrow(), None);
-            }
-        }
-
-        #[inline]
-        fn copy(&mut self, ((key, val), time, diff): &Self::Input) {
-
-            // Perhaps this is a continuation of an already received key.
-            if self.result.keys.last().map(|k| k.equals(key)).unwrap_or(false) {
-                // Perhaps this is a continuation of an already received value.
-                if self.result.vals.last().map(|v| v.equals(val)).unwrap_or(false) {
-                    // TODO: here we could look for repetition, and not push the update in that case.
-                    // More logic (and state) would be required to correctly wrangle this.
-                    self.push_update(time.clone(), diff.clone());
-                } else {
-                    // New value; complete representation of prior value.
-                    self.result.vals_offs.push(self.result.updates.len());
-                    // Remove any pending singleton, and if it was set increment our count.
-                    if self.singleton.take().is_some() { self.singletons += 1; }
-                    self.push_update(time.clone(), diff.clone());
-                    self.result.vals.copy_push(val);
-                }
-            } else {
-                // New key; complete representation of prior key.
-                self.result.vals_offs.push(self.result.updates.len());
-                // Remove any pending singleton, and if it was set increment our count.
-                if self.singleton.take().is_some() { self.singletons += 1; }
-                self.result.keys_offs.push(self.result.vals.len());
-                self.push_update(time.clone(), diff.clone());
-                self.result.vals.copy_push(val);
-                // Insert the key, but with no specified offset.
-                self.result.insert_key(key, None);
             }
         }
 

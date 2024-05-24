@@ -9,6 +9,7 @@
 use timely::dataflow::Scope;
 
 use crate::{Collection, ExchangeData, Hashable};
+use crate::consolidation::ConsolidatingContainerBuilder;
 use crate::difference::Semigroup;
 
 use crate::Data;
@@ -56,7 +57,7 @@ where
         Tr::Batcher: Batcher<Input=Vec<((D,()),G::Timestamp,R)>>,
     {
         use crate::operators::arrange::arrangement::Arrange;
-        use crate::trace::cursor::MyTrait;
+        use crate::trace::cursor::IntoOwned;
         self.map(|k| (k, ()))
             .arrange_named::<Tr>(name)
             .as_collection(|d, _| d.into_owned())
@@ -92,14 +93,13 @@ where
         use crate::collection::AsCollection;
 
         self.inner
-            .unary(Pipeline, "ConsolidateStream", |_cap, _info| {
+            .unary::<ConsolidatingContainerBuilder<_>, _, _, _>(Pipeline, "ConsolidateStream", |_cap, _info| {
 
                 let mut vector = Vec::new();
                 move |input, output| {
                     input.for_each(|time, data| {
                         data.swap(&mut vector);
-                        crate::consolidation::consolidate_updates(&mut vector);
-                        output.session(&time).give_container(&mut vector);
+                        output.session_with_builder(&time).give_container(&mut vector);
                     })
                 }
             })
