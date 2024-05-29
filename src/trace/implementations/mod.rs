@@ -45,7 +45,6 @@ pub mod merge_batcher_col;
 pub mod ord_neu;
 pub mod rhh;
 pub mod huffman_container;
-pub mod option_container;
 
 // Opinionated takes on default spines.
 pub use self::ord_neu::OrdValSpine as ValSpine;
@@ -67,17 +66,17 @@ pub trait Update {
     /// Values associated with the key.
     type Val: Ord + Clone + 'static;
     /// Time at which updates occur.
-    type Time: Ord+Lattice+timely::progress::Timestamp+Clone;
+    type Time: Ord + Clone + Lattice + timely::progress::Timestamp;
     /// Way in which updates occur.
-    type Diff: Semigroup+Clone;
+    type Diff: Ord + Semigroup + 'static;
 }
 
 impl<K,V,T,R> Update for ((K, V), T, R)
 where
     K: Ord+Clone+'static,
     V: Ord+Clone+'static,
-    T: Ord+Lattice+timely::progress::Timestamp+Clone,
-    R: Semigroup+Clone,
+    T: Ord+Clone+Lattice+timely::progress::Timestamp,
+    R: Ord+Semigroup+'static,
 {
     type Key = K;
     type Val = V;
@@ -85,22 +84,21 @@ where
     type Diff = R;
 }
 
-use crate::trace::implementations::containers::Push;
-
 /// A type with opinions on how updates should be laid out.
 pub trait Layout {
     /// The represented update.
     type Target: Update + ?Sized;
     /// Container for update keys.
-    type KeyContainer: BatchContainer<OwnedItem = <Self::Target as Update>::Key> + Push<<Self::Target as Update>::Key>;
+    // NB: The `PushInto` constraint is only required by `rhh.rs` to push default values.
+    type KeyContainer: BatchContainer + PushInto<<Self::Target as Update>::Key>;
     /// Container for update vals.
-    type ValContainer: BatchContainer<OwnedItem = <Self::Target as Update>::Val> + Push<<Self::Target as Update>::Val>;
-    /// Container for update vals.
-    type UpdContainer:
-        Push<(<Self::Target as Update>::Time, <Self::Target as Update>::Diff)> +
-        for<'a> BatchContainer<ReadItem<'a> = &'a (<Self::Target as Update>::Time, <Self::Target as Update>::Diff), OwnedItem = (<Self::Target as Update>::Time, <Self::Target as Update>::Diff)>;
+    type ValContainer: BatchContainer;
+    /// Container for times.
+    type TimeContainer: BatchContainer<Owned = <Self::Target as Update>::Time> + PushInto<<Self::Target as Update>::Time>;
+    /// Container for diffs.
+    type DiffContainer: BatchContainer<Owned = <Self::Target as Update>::Diff> + PushInto<<Self::Target as Update>::Diff>;
     /// Container for offsets.
-    type OffsetContainer: BatchContainer<OwnedItem = usize> + Push<usize>;
+    type OffsetContainer: for<'a> BatchContainer<ReadItem<'a> = usize>;
 }
 
 /// A layout that uses vectors
@@ -110,13 +108,13 @@ pub struct Vector<U: Update> {
 
 impl<U: Update> Layout for Vector<U>
 where
-    U::Key: 'static,
-    U::Val: 'static,
+    U::Diff: Ord,
 {
     type Target = U;
     type KeyContainer = Vec<U::Key>;
     type ValContainer = Vec<U::Val>;
-    type UpdContainer = Vec<(U::Time, U::Diff)>;
+    type TimeContainer = Vec<U::Time>;
+    type DiffContainer = Vec<U::Diff>;
     type OffsetContainer = OffsetList;
 }
 
@@ -127,16 +125,22 @@ pub struct TStack<U: Update> {
 
 impl<U: Update> Layout for TStack<U>
 where
-    U::Key: Columnation + 'static,
-    U::Val: Columnation + 'static,
+    U::Key: Columnation,
+    U::Val: Columnation,
     U::Time: Columnation,
-    U::Diff: Columnation,
+    U::Diff: Columnation + Ord,
 {
     type Target = U;
     type KeyContainer = TimelyStack<U::Key>;
     type ValContainer = TimelyStack<U::Val>;
-    type UpdContainer = TimelyStack<(U::Time, U::Diff)>;
+    type TimeContainer = TimelyStack<U::Time>;
+    type DiffContainer = TimelyStack<U::Diff>;
     type OffsetContainer = OffsetList;
+}
+
+/// A layout based on timely stacks
+pub struct FlatLayout<U: Update> {
+    phantom: std::marker::PhantomData<U>,
 }
 
 /// A type with a preferred container.
@@ -144,7 +148,7 @@ where
 /// Examples include types that implement `Clone` who prefer
 pub trait PreferredContainer : ToOwned {
     /// The preferred container for the type.
-    type Container: BatchContainer<OwnedItem = Self::Owned> + Push<Self::Owned>;
+    type Container: BatchContainer + PushInto<Self::Owned>;
 }
 
 impl<T: Ord + Clone + 'static> PreferredContainer for T {
@@ -166,8 +170,8 @@ where
     K::Owned: Ord+Clone+'static,
     V: ToOwned + ?Sized,
     V::Owned: Ord+Clone+'static,
-    T: Ord+Lattice+timely::progress::Timestamp+Clone,
-    R: Semigroup+Clone,
+    T: Ord+Clone+Lattice+timely::progress::Timestamp,
+    R: Ord+Clone+Semigroup+'static,
 {
     type Key = K::Owned;
     type Val = V::Owned;
@@ -179,21 +183,20 @@ impl<K, V, T, D> Layout for Preferred<K, V, T, D>
 where
     K: Ord+ToOwned+PreferredContainer + ?Sized,
     K::Owned: Ord+Clone+'static,
-    // for<'a> K::Container: BatchContainer<ReadItem<'a> = &'a K>,
     V: Ord+ToOwned+PreferredContainer + ?Sized,
     V::Owned: Ord+Clone+'static,
-    T: Ord+Lattice+timely::progress::Timestamp+Clone,
-    D: Semigroup+Clone,
+    T: Ord+Clone+Lattice+timely::progress::Timestamp,
+    D: Ord+Clone+Semigroup+'static,
 {
     type Target = Preferred<K, V, T, D>;
     type KeyContainer = K::Container;
     type ValContainer = V::Container;
-    type UpdContainer = Vec<(T, D)>;
+    type TimeContainer = Vec<T>;
+    type DiffContainer = Vec<D>;
     type OffsetContainer = OffsetList;
 }
 
 use std::convert::TryInto;
-use std::ops::Deref;
 use abomonation_derive::Abomonation;
 use crate::trace::cursor::IntoOwned;
 
@@ -287,52 +290,18 @@ impl<'a> Iterator for OffsetListIter<'a> {
     }
 }
 
-impl PushInto<OffsetList> for usize {
-    fn push_into(self, target: &mut OffsetList) {
-        target.push(self);
-    }
-}
-
-/// Helper struct to provide `IntoOwned` for `Copy` types.
-#[derive(Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
-pub struct Wrapper<T: Copy>(T);
-
-impl<T: Copy> Deref for Wrapper<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<'a, T: Copy + Ord> IntoOwned<'a> for Wrapper<T> {
-    type Owned = T;
-
-    fn into_owned(self) -> Self::Owned {
-        self.0
-    }
-
-    fn clone_onto(&self, other: &mut Self::Owned) {
-        *other = self.0;
-    }
-
-    fn borrow_as(owned: &'a Self::Owned) -> Self {
-        Self(*owned)
-    }
-}
-
-impl Push<usize> for OffsetList {
-    fn push(&mut self, item: usize) {
+impl PushInto<usize> for OffsetList {
+    fn push_into(&mut self, item: usize) {
         self.push(item);
     }
 }
 
 impl BatchContainer for OffsetList {
-    type OwnedItem = usize;
-    type ReadItem<'a> = Wrapper<usize>;
+    type Owned = usize;
+    type ReadItem<'a> = usize;
 
     fn copy(&mut self, item: Self::ReadItem<'_>) {
-        self.push(item.0);
+        self.push(item);
     }
 
     fn copy_range(&mut self, other: &Self, start: usize, end: usize) {
@@ -340,6 +309,8 @@ impl BatchContainer for OffsetList {
             self.push(other.index(offset));
         }
     }
+
+    fn reborrow<'b, 'a: 'b>(item: Self::ReadItem<'a>) -> Self::ReadItem<'b> { item }
 
     fn with_capacity(size: usize) -> Self {
         Self::with_capacity(size)
@@ -350,7 +321,7 @@ impl BatchContainer for OffsetList {
     }
 
     fn index(&self, index: usize) -> Self::ReadItem<'_> {
-        Wrapper(self.index(index))
+        self.index(index)
     }
 
     fn len(&self) -> usize {
@@ -384,7 +355,7 @@ where
     K: Ord + Clone + 'static,
     V: Ord + Clone + 'static,
     T: Timestamp + Lattice + Clone + 'static,
-    R: Semigroup + Clone + 'static,
+    R: Ord + Semigroup + 'static,
 {
     type Key<'a> = K;
     type Val<'a> = V;
@@ -409,7 +380,7 @@ where
     K: Ord + Columnation + Clone + 'static,
     V: Ord + Columnation + Clone + 'static,
     T: Timestamp + Lattice + Columnation + Clone + 'static,
-    R: Semigroup + Columnation + Clone + 'static,
+    R: Ord + Clone + Semigroup + Columnation + 'static,
 {
     type Key<'a> = &'a K;
     type Val<'a> = &'a V;
@@ -429,14 +400,87 @@ where
     }
 }
 
+mod flatcontainer {
+    use timely::container::columnation::{Columnation, TimelyStack};
+    use timely::container::flatcontainer::{Containerized, FlatStack, Push, Region};
+    use timely::progress::Timestamp;
+    use crate::difference::Semigroup;
+    use crate::lattice::Lattice;
+    use crate::trace::implementations::{BuilderInput, FlatLayout, Layout, OffsetList, Update};
+
+    impl<U: Update> Layout for FlatLayout<U>
+        where
+            U::Key: Containerized,
+            for<'a> <U::Key as Containerized>::Region: Push<U::Key> + Push<<<U::Key as Containerized>::Region as Region>::ReadItem<'a>>,
+            for<'a> <<U::Key as Containerized>::Region as Region>::ReadItem<'a>: Copy + Ord,
+            U::Val: Containerized,
+            for<'a> <U::Val as Containerized>::Region: Push<U::Val> + Push<<<U::Val as Containerized>::Region as Region>::ReadItem<'a>>,
+            for<'a> <<U::Val as Containerized>::Region as Region>::ReadItem<'a>: Copy + Ord,
+            U::Time: Containerized,
+            <U::Time as Containerized>::Region: Region<Owned=U::Time>,
+            for<'a> <U::Time as Containerized>::Region: Push<U::Time> + Push<<<U::Time as Containerized>::Region as Region>::ReadItem<'a>>,
+            for<'a> <<U::Time as Containerized>::Region as Region>::ReadItem<'a>: Copy + Ord,
+            U::Diff: Containerized,
+            <U::Diff as Containerized>::Region: Region<Owned=U::Diff>,
+            for<'a> <U::Diff as Containerized>::Region: Push<U::Diff> + Push<<<U::Diff as Containerized>::Region as Region>::ReadItem<'a>>,
+            for<'a> <<U::Diff as Containerized>::Region as Region>::ReadItem<'a>: Copy + Ord,
+    {
+        type Target = U;
+        type KeyContainer = FlatStack<<U::Key as Containerized>::Region>;
+        type ValContainer = FlatStack<<U::Val as Containerized>::Region>;
+        type TimeContainer = FlatStack<<U::Time as Containerized>::Region>;
+        type DiffContainer = FlatStack<<U::Diff as Containerized>::Region>;
+        type OffsetContainer = OffsetList;
+    }
+
+    impl<K,V,T,R> BuilderInput<FlatLayout<((K, V), T, R)>> for TimelyStack<((K, V), T, R)>
+    where
+        K: Ord + Columnation + Containerized + Clone + 'static,
+        for<'a> K::Region: Push<K> + Push<<K::Region as Region>::ReadItem<'a>>,
+        for<'a> <K::Region as Region>::ReadItem<'a>: Copy + Ord,
+        for<'a> K: PartialEq<<K::Region as Region>::ReadItem<'a>>,
+        V: Ord + Columnation + Containerized + Clone + 'static,
+        for<'a> V::Region: Push<V> + Push<<V::Region as Region>::ReadItem<'a>>,
+        for<'a> <V::Region as Region>::ReadItem<'a>: Copy + Ord,
+        for<'a> V: PartialEq<<V::Region as Region>::ReadItem<'a>>,
+        T: Timestamp + Lattice + Columnation + Containerized + Clone + 'static,
+        for<'a> T::Region: Region<Owned=T> + Push<T> + Push<<T::Region as Region>::ReadItem<'a>>,
+        for<'a> <T::Region as Region>::ReadItem<'a>: Copy + Ord,
+        for<'a> T: PartialEq<<T::Region as Region>::ReadItem<'a>>,
+        R: Ord + Clone + Semigroup + Columnation + Containerized + 'static,
+        for<'a> R::Region: Region<Owned=R> + Push<R> + Push<<R::Region as Region>::ReadItem<'a>>,
+        for<'a> <R::Region as Region>::ReadItem<'a>: Copy + Ord,
+        for<'a> R: PartialEq<<R::Region as Region>::ReadItem<'a>>,
+    {
+        type Key<'a> = &'a K;
+        type Val<'a> = &'a V;
+        type Time = T;
+        type Diff = R;
+
+        fn into_parts<'a>(((key, val), time, diff): Self::Item<'a>) -> (Self::Key<'a>, Self::Val<'a>, Self::Time, Self::Diff) {
+            (key, val, time.clone(), diff.clone())
+        }
+
+        fn key_eq(this: &&K, other: <<K as Containerized>::Region as Region>::ReadItem<'_>) -> bool {
+            **this == <K as Containerized>::Region::reborrow(other)
+        }
+
+        fn val_eq(this: &&V, other: <<V as Containerized>::Region as Region>::ReadItem<'_>) -> bool {
+            **this == <V as Containerized>::Region::reborrow(other)
+        }
+    }
+}
+
 impl<K,V,T,R> BuilderInput<Preferred<K, V, T, R>> for TimelyStack<((<K as ToOwned>::Owned, <V as ToOwned>::Owned), T, R)>
 where
     K: Ord+ToOwned+PreferredContainer + ?Sized,
     K::Owned: Columnation + Ord+Clone+'static,
+    for<'a> <<K as PreferredContainer>::Container as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = K::Owned>,
     V: Ord+ToOwned+PreferredContainer + ?Sized,
     V::Owned: Columnation + Ord+Clone+'static,
-    T: Columnation + Ord+Lattice+Timestamp+Clone,
-    R: Columnation + Semigroup+Clone,
+    for<'a> <<V as PreferredContainer>::Container as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = V::Owned>,
+    T: Columnation + Ord+Clone+Lattice+Timestamp,
+    R: Columnation + Ord+Clone+Semigroup+'static,
 {
     type Key<'a> = &'a K::Owned;
     type Val<'a> = &'a V::Owned;
@@ -448,11 +492,11 @@ where
     }
 
     fn key_eq(this: &&K::Owned, other: <<K as PreferredContainer>::Container as BatchContainer>::ReadItem<'_>) -> bool {
-        other.eq(&<<<K as PreferredContainer>::Container as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(this))
+        <<K as PreferredContainer>::Container as BatchContainer>::reborrow(other).eq(&<<K as PreferredContainer>::Container as BatchContainer>::reborrow(<<<K as PreferredContainer>::Container as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(this)))
     }
 
     fn val_eq(this: &&V::Owned, other: <<V as PreferredContainer>::Container as BatchContainer>::ReadItem<'_>) -> bool {
-        other.eq(&<<<V as PreferredContainer>::Container as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(this))
+        <<V as PreferredContainer>::Container as BatchContainer>::reborrow(other).eq(&<<V as PreferredContainer>::Container as BatchContainer>::reborrow(<<<V as PreferredContainer>::Container as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(this)))
     }
 }
 
@@ -463,29 +507,20 @@ pub mod containers {
 
     use timely::container::columnation::{Columnation, TimelyStack};
     use timely::container::PushInto;
-
-    use std::borrow::ToOwned;
     use crate::trace::IntoOwned;
-
-    /// Supports the ability to receive an item of type `T`.
-    pub trait Push<T> {
-        /// Pushes the item into `self`.
-        fn push(&mut self, item: T);
-    }
-
-    impl<T: Columnation> Push<T> for TimelyStack<T> {
-        fn push(&mut self, item: T) {
-            self.copy(&item);
-        }
-    }
 
     /// A general-purpose container resembling `Vec<T>`.
     pub trait BatchContainer: 'static {
-        /// An type that all `Self::ReadItem<'_>` can be converted into.
-        type OwnedItem;
-        /// The type that can be read back out of the container.
-        type ReadItem<'a>: Copy + IntoOwned<'a, Owned = Self::OwnedItem> + Ord + for<'b> PartialOrd<Self::ReadItem<'b>>;
+        /// An owned instance of `Self::ReadItem<'_>`.
+        type Owned;
 
+        /// The type that can be read back out of the container.
+        type ReadItem<'a>: Copy + Ord + IntoOwned<'a, Owned = Self::Owned>;
+
+        /// Push an item into this container
+        fn push<D>(&mut self, item: D) where Self: PushInto<D> {
+            self.push_into(item);
+        }
         /// Inserts a borrowed item.
         fn copy(&mut self, item: Self::ReadItem<'_>);
         /// Extends from a range of items in another`Self`.
@@ -498,6 +533,9 @@ pub mod containers {
         fn with_capacity(size: usize) -> Self;
         /// Creates a new container with sufficient capacity.
         fn merge_capacity(cont1: &Self, cont2: &Self) -> Self;
+
+        /// Converts a read item into one with a narrower lifetime.
+        fn reborrow<'b, 'a: 'b>(item: Self::ReadItem<'a>) -> Self::ReadItem<'b>;
 
         /// Reference to the element at this position.
         fn index(&self, index: usize) -> Self::ReadItem<'_>;
@@ -560,17 +598,13 @@ pub mod containers {
         }
     }
 
-    impl<T> Push<T> for Vec<T> {
-        fn push(&mut self, item: T) {
-            self.push(item);
-        }
-    }
-
     // All `T: Clone` also implement `ToOwned<Owned = T>`, but without the constraint Rust
     // struggles to understand why the owned type must be `T` (i.e. the one blanket impl).
     impl<T: Ord + Clone + 'static> BatchContainer for Vec<T> {
-        type OwnedItem = T;
-        type ReadItem<'a> = &'a Self::OwnedItem;
+        type Owned = T;
+        type ReadItem<'a> = &'a T;
+
+        fn reborrow<'b, 'a: 'b>(item: Self::ReadItem<'a>) -> Self::ReadItem<'b> { item }
 
         fn copy(&mut self, item: &T) {
             self.push(item.clone());
@@ -594,9 +628,11 @@ pub mod containers {
 
     // The `ToOwned` requirement exists to satisfy `self.reserve_items`, who must for now
     // be presented with the actual contained type, rather than a type that borrows into it.
-    impl<T: Ord + Columnation + ToOwned<Owned = T> + 'static> BatchContainer for TimelyStack<T> {
-        type OwnedItem = T;
-        type ReadItem<'a> = &'a Self::OwnedItem;
+    impl<T: Clone + Ord + Columnation + 'static> BatchContainer for TimelyStack<T> {
+        type Owned = T;
+        type ReadItem<'a> = &'a T;
+
+        fn reborrow<'b, 'a: 'b>(item: Self::ReadItem<'a>) -> Self::ReadItem<'b> { item }
 
         fn copy(&mut self, item: &T) {
             self.copy(item);
@@ -624,6 +660,44 @@ pub mod containers {
         }
     }
 
+    mod flatcontainer {
+        use timely::container::flatcontainer::{FlatStack, Push, Region};
+        use crate::trace::implementations::BatchContainer;
+
+        impl<R> BatchContainer for FlatStack<R>
+        where
+            for<'a> R: Region + Push<<R as Region>::ReadItem<'a>> + 'static,
+            for<'a> R::ReadItem<'a>: Copy + Ord,
+        {
+            type Owned = R::Owned;
+            type ReadItem<'a> = R::ReadItem<'a>;
+
+            fn copy(&mut self, item: Self::ReadItem<'_>) {
+                self.copy(item);
+            }
+
+            fn with_capacity(size: usize) -> Self {
+                Self::with_capacity(size)
+            }
+
+            fn merge_capacity(cont1: &Self, cont2: &Self) -> Self {
+                Self::merge_capacity([cont1, cont2].into_iter())
+            }
+
+            fn reborrow<'b, 'a: 'b>(item: Self::ReadItem<'a>) -> Self::ReadItem<'b> {
+                R::reborrow(item)
+            }
+
+            fn index(&self, index: usize) -> Self::ReadItem<'_> {
+                self.get(index)
+            }
+
+            fn len(&self) -> usize {
+                self.len()
+            }
+        }
+    }
+
     /// A container that accepts slices `[B::Item]`.
     pub struct SliceContainer<B> {
         /// Offsets that bound each contained slice.
@@ -635,20 +709,20 @@ pub mod containers {
         inner: Vec<B>,
     }
 
-    impl<B: Ord + Clone + 'static> PushInto<SliceContainer<B>> for &[B] {
-        fn push_into(self, target: &mut SliceContainer<B>) {
-            target.copy(self)
+    impl<B: Ord + Clone + 'static> PushInto<&[B]> for SliceContainer<B> {
+        fn push_into(&mut self, item: &[B]) {
+            self.copy(item);
         }
     }
 
-    impl<B: Ord + Clone + 'static> PushInto<SliceContainer<B>> for &Vec<B> {
-        fn push_into(self, target: &mut SliceContainer<B>) {
-            target.copy(self)
+    impl<B: Ord + Clone + 'static> PushInto<&Vec<B>> for SliceContainer<B> {
+        fn push_into(&mut self, item: &Vec<B>) {
+            self.copy(item);
         }
     }
 
-    impl<B> Push<Vec<B>> for SliceContainer<B> {
-        fn push(&mut self, item: Vec<B>) {
+    impl<B> PushInto<Vec<B>> for SliceContainer<B> {
+        fn push_into(&mut self, item: Vec<B>) {
             for x in item.into_iter() {
                 self.inner.push(x);
             }
@@ -660,8 +734,10 @@ pub mod containers {
     where
         B: Ord + Clone + Sized + 'static,
     {
-        type OwnedItem = Vec<B>;
+        type Owned = Vec<B>;
         type ReadItem<'a> = &'a [B];
+
+        fn reborrow<'b, 'a: 'b>(item: Self::ReadItem<'a>) -> Self::ReadItem<'b> { item }
 
         fn copy(&mut self, item: Self::ReadItem<'_>) {
             for x in item.iter() {

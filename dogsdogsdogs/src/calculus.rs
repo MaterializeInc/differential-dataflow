@@ -34,14 +34,16 @@ impl<G, D, R> Differentiate<G, D, R> for Collection<G, D, R>
 where
     G: Scope,
     D: Data,
-    R: Abelian,
+    R: Abelian + 'static,
 {
     // For each (data, Alt(time), diff) we add a (data, Neu(time), -diff).
     fn differentiate<'a>(&self, child: &Child<'a, G, AltNeu<G::Timestamp>>) -> Collection<Child<'a, G, AltNeu<G::Timestamp>>, D, R> {
         self.enter(child)
             .inner
             .flat_map(|(data, time, diff)| {
-                let neu = (data.clone(), AltNeu::neu(time.time.clone()), diff.clone().negate());
+                let mut neg_diff = diff.clone();
+                neg_diff.negate();
+                let neu = (data.clone(), AltNeu::neu(time.time.clone()), neg_diff);
                 let alt = (data, time, diff);
                 Some(alt).into_iter().chain(Some(neu))
             })
@@ -53,7 +55,7 @@ impl<'a, G, D, R> Integrate<G, D, R> for Collection<Child<'a, G, AltNeu<G::Times
 where
     G: Scope,
     D: Data,
-    R: Abelian,
+    R: Abelian + 'static,
 {
     // We discard each `neu` variant and strip off the `alt` wrapper.
     fn integrate(&self) -> Collection<G, D, R> {

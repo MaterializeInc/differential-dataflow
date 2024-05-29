@@ -120,7 +120,7 @@ where
         -> Arranged<Child<'a, G, TInner>, TraceEnterAt<Tr, TInner, F, P>>
         where
             TInner: Refines<G::Timestamp>+Lattice+Timestamp+Clone+'static,
-            F: FnMut(Tr::Key<'_>, Tr::Val<'_>, &G::Timestamp)->TInner+Clone+'static,
+            F: FnMut(Tr::Key<'_>, Tr::Val<'_>, Tr::TimeGat<'_>)->TInner+Clone+'static,
             P: FnMut(&TInner)->Tr::Time+Clone+'static,
         {
         let logic1 = logic.clone();
@@ -217,7 +217,7 @@ where
                         while let Some(val) = cursor.get_val(batch) {
                             for datum in logic(key, val) {
                                 cursor.map_times(batch, |time, diff| {
-                                    session.give((datum.clone(), time.clone(), diff.clone()));
+                                    session.give((datum.clone(), time.into_owned(), diff.into_owned()));
                                 });
                             }
                             cursor.step_val(batch);
@@ -244,7 +244,7 @@ where
     where
         T2: for<'a> TraceReader<Key<'a>=T1::Key<'a>,Time=T1::Time>+Clone+'static,
         T1::Diff: Multiply<T2::Diff>,
-        <T1::Diff as Multiply<T2::Diff>>::Output: Semigroup,
+        <T1::Diff as Multiply<T2::Diff>>::Output: Semigroup+'static,
         I: IntoIterator,
         I::Item: Data,
         L: FnMut(T1::Key<'_>,T1::Val<'_>,T2::Val<'_>)->I+'static
@@ -261,7 +261,7 @@ where
     where
         T2: for<'a> TraceReader<Key<'a>=T1::Key<'a>, Time=T1::Time>+Clone+'static,
         D: Data,
-        ROut: Semigroup,
+        ROut: Semigroup+'static,
         I: IntoIterator<Item=(D, G::Timestamp, ROut)>,
         L: FnMut(T1::Key<'_>, T1::Val<'_>,T2::Val<'_>,&G::Timestamp,&T1::Diff,&T2::Diff)->I+'static,
     {
@@ -279,6 +279,8 @@ where
     }
 }
 
+use crate::trace::cursor::IntoOwned;
+
 // Direct reduce implementations.
 use crate::difference::Abelian;
 impl<G, T1> Arranged<G, T1>
@@ -287,39 +289,41 @@ where
     T1: TraceReader + Clone + 'static,
 {
     /// A direct implementation of `ReduceCore::reduce_abelian`.
-    pub fn reduce_abelian<L, V, F, T2>(&self, name: &str, from: F, mut logic: L) -> Arranged<G, TraceAgent<T2>>
+    pub fn reduce_abelian<L, K, V, T2>(&self, name: &str, mut logic: L) -> Arranged<G, TraceAgent<T2>>
     where
+        for<'a> T1::Key<'a>: IntoOwned<'a, Owned = K>,
         T2: for<'a> Trace<Key<'a>= T1::Key<'a>, Time=T1::Time>+'static,
+        K: Ord + 'static,
         V: Data,
-        F: Fn(T2::Val<'_>) -> V + 'static,
+        for<'a> T2::Val<'a> : IntoOwned<'a, Owned = V>,
         T2::Diff: Abelian,
         T2::Batch: Batch,
-        <T2::Builder as Builder>::Input: Container,
-        ((T1::KeyOwned, V), T2::Time, T2::Diff): PushInto<<T2::Builder as Builder>::Input>,
+        <T2::Builder as Builder>::Input: Container + PushInto<((K, V), T2::Time, T2::Diff)>,
         L: FnMut(T1::Key<'_>, &[(T1::Val<'_>, T1::Diff)], &mut Vec<(V, T2::Diff)>)+'static,
     {
-        self.reduce_core::<_,V,F,T2>(name, from, move |key, input, output, change| {
+        self.reduce_core::<_,K,V,T2>(name, move |key, input, output, change| {
             if !input.is_empty() {
                 logic(key, input, change);
             }
-            change.extend(output.drain(..).map(|(x,d)| (x, d.negate())));
+            change.extend(output.drain(..).map(|(x,mut d)| { d.negate(); (x, d) }));
             crate::consolidation::consolidate(change);
         })
     }
 
     /// A direct implementation of `ReduceCore::reduce_core`.
-    pub fn reduce_core<L, V, F, T2>(&self, name: &str, from: F, logic: L) -> Arranged<G, TraceAgent<T2>>
+    pub fn reduce_core<L, K, V, T2>(&self, name: &str, logic: L) -> Arranged<G, TraceAgent<T2>>
     where
+        for<'a> T1::Key<'a>: IntoOwned<'a, Owned = K>,
         T2: for<'a> Trace<Key<'a>=T1::Key<'a>, Time=T1::Time>+'static,
+        K: Ord + 'static,
         V: Data,
-        F: Fn(T2::Val<'_>) -> V + 'static,
+        for<'a> T2::Val<'a> : IntoOwned<'a, Owned = V>,
         T2::Batch: Batch,
-        <T2::Builder as Builder>::Input: Container,
-        ((T1::KeyOwned, V), T2::Time, T2::Diff): PushInto<<T2::Builder as Builder>::Input>,
+        <T2::Builder as Builder>::Input: Container + PushInto<((K, V), T2::Time, T2::Diff)>,
         L: FnMut(T1::Key<'_>, &[(T1::Val<'_>, T1::Diff)], &mut Vec<(V, T2::Diff)>, &mut Vec<(V, T2::Diff)>)+'static,
     {
         use crate::operators::reduce::reduce_trace;
-        reduce_trace::<_,_,_,V,_,_>(self, name, from, logic)
+        reduce_trace::<_,_,_,_,V,_>(self, name, logic)
     }
 }
 
@@ -599,7 +603,7 @@ where
 /// This arrangement requires `Key: Hashable`, and uses the `hashed()` method to place keys in a hashed
 /// map. This can result in many hash calls, and in some cases it may help to first transform `K` to the
 /// pair `(u64, K)` of hash value and key.
-pub trait ArrangeByKey<G: Scope, K: Data+Hashable, V: Data, R: Semigroup>
+pub trait ArrangeByKey<G: Scope, K: Data+Hashable, V: Data, R: Ord+Semigroup+'static>
 where G::Timestamp: Lattice+Ord {
     /// Arranges a collection of `(Key, Val)` records by `Key`.
     ///
@@ -630,7 +634,7 @@ where
 /// This arrangement requires `Key: Hashable`, and uses the `hashed()` method to place keys in a hashed
 /// map. This can result in many hash calls, and in some cases it may help to first transform `K` to the
 /// pair `(u64, K)` of hash value and key.
-pub trait ArrangeBySelf<G: Scope, K: Data+Hashable, R: Semigroup>
+pub trait ArrangeBySelf<G: Scope, K: Data+Hashable, R: Ord+Semigroup+'static>
 where
     G::Timestamp: Lattice+Ord
 {

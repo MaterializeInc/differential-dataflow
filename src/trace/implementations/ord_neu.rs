@@ -16,7 +16,7 @@ use crate::trace::implementations::merge_batcher::{MergeBatcher, VecMerger};
 use crate::trace::implementations::merge_batcher_col::ColumnationMerger;
 use crate::trace::rc_blanket_impls::RcBuilder;
 
-use super::{Update, Layout, Vector, TStack, Preferred};
+use super::{Update, Layout, Vector, TStack, Preferred, FlatLayout};
 
 pub use self::val_batch::{OrdValBatch, OrdValBuilder};
 pub use self::key_batch::{OrdKeyBatch, OrdKeyBuilder};
@@ -37,6 +37,13 @@ pub type ColValSpine<K, V, T, R> = Spine<
     RcBuilder<OrdValBuilder<TStack<((K,V),T,R)>, TimelyStack<((K,V),T,R)>>>,
 >;
 
+/// A trace implementation backed by flatcontainer storage.
+pub type FlatValSpine<K, V, T, R> = Spine<
+    Rc<OrdValBatch<FlatLayout<((K,V),T,R)>>>,
+    MergeBatcher<ColumnationMerger<((K,V),T,R)>, T>,
+    RcBuilder<OrdValBuilder<FlatLayout<((K,V),T,R)>, TimelyStack<((K,V),T,R)>>>,
+>;
+
 /// A trace implementation using a spine of ordered lists.
 pub type OrdKeySpine<K, T, R> = Spine<
     Rc<OrdKeyBatch<Vector<((K,()),T,R)>>>,
@@ -51,6 +58,13 @@ pub type ColKeySpine<K, T, R> = Spine<
     Rc<OrdKeyBatch<TStack<((K,()),T,R)>>>,
     MergeBatcher<ColumnationMerger<((K,()),T,R)>, T>,
     RcBuilder<OrdKeyBuilder<TStack<((K,()),T,R)>, TimelyStack<((K,()),T,R)>>>,
+>;
+
+/// A trace implementation backed by flatcontainer storage.
+pub type FlatKeySpine<K, T, R> = Spine<
+    Rc<OrdValBatch<FlatLayout<((K,()),T,R)>>>,
+    MergeBatcher<ColumnationMerger<((K,()),T,R)>, T>,
+    RcBuilder<OrdValBuilder<FlatLayout<((K,()),T,R)>, TimelyStack<((K,()),T,R)>>>,
 >;
 
 /// A trace implementation backed by columnar storage.
@@ -71,8 +85,6 @@ mod val_batch {
     use abomonation_derive::Abomonation;
     use timely::container::PushInto;
     use timely::progress::{Antichain, frontier::AntichainRef};
-
-    use crate::trace::implementations::containers::Push;
 
     use crate::trace::{Batch, BatchReader, Builder, Cursor, Description, Merger};
     use crate::trace::implementations::{BatchContainer, BuilderInput};
@@ -100,19 +112,21 @@ mod val_batch {
         ///
         /// The length of this list is one longer than `vals`, so that we can avoid bounds logic.
         pub vals_offs: L::OffsetContainer,
-        /// Concatenated ordered lists of updates, bracketed by offsets in `vals_offs`.
-        pub updates: L::UpdContainer,
+        /// Concatenated ordered lists of update times, bracketed by offsets in `vals_offs`.
+        pub times: L::TimeContainer,
+        /// Concatenated ordered lists of update diffs, bracketed by offsets in `vals_offs`.
+        pub diffs: L::DiffContainer,
     }
 
     impl<L: Layout> OrdValStorage<L> {
         /// Lower and upper bounds in `self.vals` corresponding to the key at `index`.
         fn values_for_key(&self, index: usize) -> (usize, usize) {
-            (self.keys_offs.index(index).into_owned(), self.keys_offs.index(index+1).into_owned())
+            (self.keys_offs.index(index), self.keys_offs.index(index+1))
         }
         /// Lower and upper bounds in `self.updates` corresponding to the value at `index`.
         fn updates_for_value(&self, index: usize) -> (usize, usize) {
-            let mut lower = self.vals_offs.index(index).into_owned();
-            let upper = self.vals_offs.index(index+1).into_owned();
+            let mut lower = self.vals_offs.index(index);
+            let upper = self.vals_offs.index(index+1);
             // We use equal lower and upper to encode "singleton update; just before here".
             // It should only apply when there is a prior element, so `lower` should be greater than zero.
             if lower == upper {
@@ -143,10 +157,11 @@ mod val_batch {
 
     impl<L: Layout> BatchReader for OrdValBatch<L> {
         type Key<'a> = <L::KeyContainer as BatchContainer>::ReadItem<'a>;
-        type KeyOwned = <L::Target as Update>::Key;
         type Val<'a> = <L::ValContainer as BatchContainer>::ReadItem<'a>;
         type Time = <L::Target as Update>::Time;
+        type TimeGat<'a> = <L::TimeContainer as BatchContainer>::ReadItem<'a>;
         type Diff = <L::Target as Update>::Diff;
+        type DiffGat<'a> = <L::DiffContainer as BatchContainer>::ReadItem<'a>;
 
         type Cursor = OrdValCursor<L>;
         fn cursor(&self) -> Self::Cursor { 
@@ -195,6 +210,8 @@ mod val_batch {
     impl<L: Layout> Merger<OrdValBatch<L>> for OrdValMerger<L>
     where
         OrdValBatch<L>: Batch<Time=<L::Target as Update>::Time>,
+        for<'a> <L::TimeContainer as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = <L::Target as Update>::Time>,
+        for<'a> <L::DiffContainer as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = <L::Target as Update>::Diff>,
     {
         fn new(batch1: &OrdValBatch<L>, batch2: &OrdValBatch<L>, compaction_frontier: AntichainRef<<L::Target as Update>::Time>) -> Self {
 
@@ -213,14 +230,15 @@ mod val_batch {
                 keys_offs: L::OffsetContainer::with_capacity(batch1.keys_offs.len() + batch2.keys_offs.len()),
                 vals: L::ValContainer::merge_capacity(&batch1.vals, &batch2.vals),
                 vals_offs: L::OffsetContainer::with_capacity(batch1.vals_offs.len() + batch2.vals_offs.len()),
-                updates: L::UpdContainer::merge_capacity(&batch1.updates, &batch2.updates),
+                times: L::TimeContainer::merge_capacity(&batch1.times, &batch2.times),
+                diffs: L::DiffContainer::merge_capacity(&batch1.diffs, &batch2.diffs),
             };
 
             // Mark explicit types because type inference fails to resolve it.
             let keys_offs: &mut L::OffsetContainer = &mut storage.keys_offs;
-            keys_offs.push(0);
+            keys_offs.copy(0);
             let vals_offs: &mut L::OffsetContainer = &mut storage.vals_offs;
-            vals_offs.push(0);
+            vals_offs.copy(0);
 
             OrdValMerger {
                 key_cursor1: 0,
@@ -233,7 +251,7 @@ mod val_batch {
         }
         fn done(self) -> OrdValBatch<L> {
             OrdValBatch {
-                updates: self.result.updates.len() + self.singletons,
+                updates: self.result.times.len() + self.singletons,
                 storage: self.result,
                 description: self.description,
             }
@@ -241,14 +259,14 @@ mod val_batch {
         fn work(&mut self, source1: &OrdValBatch<L>, source2: &OrdValBatch<L>, fuel: &mut isize) {
 
             // An (incomplete) indication of the amount of work we've done so far.
-            let starting_updates = self.result.updates.len();
+            let starting_updates = self.result.times.len();
             let mut effort = 0isize;
 
             // While both mergees are still active, perform single-key merges.
             while self.key_cursor1 < source1.storage.keys.len() && self.key_cursor2 < source2.storage.keys.len() && effort < *fuel {
                 self.merge_key(&source1.storage, &source2.storage);
                 // An (incomplete) accounting of the work we've done.
-                effort = (self.result.updates.len() - starting_updates) as isize;
+                effort = (self.result.times.len() - starting_updates) as isize;
             }
 
             // Merging is complete, and only copying remains. 
@@ -256,12 +274,12 @@ mod val_batch {
             while self.key_cursor1 < source1.storage.keys.len() && effort < *fuel {
                 self.copy_key(&source1.storage, self.key_cursor1);
                 self.key_cursor1 += 1;
-                effort = (self.result.updates.len() - starting_updates) as isize;
+                effort = (self.result.times.len() - starting_updates) as isize;
             }
             while self.key_cursor2 < source2.storage.keys.len() && effort < *fuel {
                 self.copy_key(&source2.storage, self.key_cursor2);
                 self.key_cursor2 += 1;
-                effort = (self.result.updates.len() - starting_updates) as isize;
+                effort = (self.result.times.len() - starting_updates) as isize;
             }
 
             *fuel -= effort;
@@ -284,7 +302,7 @@ mod val_batch {
             while lower < upper {
                 self.stash_updates_for_val(source, lower);
                 if let Some(off) = self.consolidate_updates() {
-                    self.result.vals_offs.push(off);
+                    self.result.vals_offs.copy(off);
                     self.result.vals.copy(source.vals.index(lower));
                 }
                 lower += 1;
@@ -293,7 +311,7 @@ mod val_batch {
             // If we have pushed any values, copy the key as well.
             if self.result.vals.len() > init_vals {
                 self.result.keys.copy(source.keys.index(cursor));
-                self.result.keys_offs.push(self.result.vals.len());
+                self.result.keys_offs.copy(self.result.vals.len());
             }           
         }
         /// Merge the next key in each of `source1` and `source2` into `self`, updating the appropriate cursors.
@@ -313,7 +331,7 @@ mod val_batch {
                     let (lower2, upper2) = source2.values_for_key(self.key_cursor2);
                     if let Some(off) = self.merge_vals((source1, lower1, upper1), (source2, lower2, upper2)) {
                         self.result.keys.copy(source1.keys.index(self.key_cursor1));
-                        self.result.keys_offs.push(off);
+                        self.result.keys_offs.copy(off);
                     }
                     // Increment cursors in either case; the keys are merged.
                     self.key_cursor1 += 1;
@@ -346,7 +364,7 @@ mod val_batch {
                         // Extend stash by updates, with logical compaction applied.
                         self.stash_updates_for_val(source1, lower1);
                         if let Some(off) = self.consolidate_updates() {
-                            self.result.vals_offs.push(off);
+                            self.result.vals_offs.copy(off);
                             self.result.vals.copy(source1.vals.index(lower1));
                         }
                         lower1 += 1;
@@ -355,7 +373,7 @@ mod val_batch {
                         self.stash_updates_for_val(source1, lower1);
                         self.stash_updates_for_val(source2, lower2);
                         if let Some(off) = self.consolidate_updates() {
-                            self.result.vals_offs.push(off);
+                            self.result.vals_offs.copy(off);
                             self.result.vals.copy(source1.vals.index(lower1));
                         }
                         lower1 += 1;
@@ -365,7 +383,7 @@ mod val_batch {
                         // Extend stash by updates, with logical compaction applied.
                         self.stash_updates_for_val(source2, lower2);
                         if let Some(off) = self.consolidate_updates() {
-                            self.result.vals_offs.push(off);
+                            self.result.vals_offs.copy(off);
                             self.result.vals.copy(source2.vals.index(lower2));
                         }
                         lower2 += 1;
@@ -376,7 +394,7 @@ mod val_batch {
             while lower1 < upper1 {
                 self.stash_updates_for_val(source1, lower1);
                 if let Some(off) = self.consolidate_updates() {
-                    self.result.vals_offs.push(off);
+                    self.result.vals_offs.copy(off);
                     self.result.vals.copy(source1.vals.index(lower1));
                 }
                 lower1 += 1;
@@ -384,7 +402,7 @@ mod val_batch {
             while lower2 < upper2 {
                 self.stash_updates_for_val(source2, lower2);
                 if let Some(off) = self.consolidate_updates() {
-                    self.result.vals_offs.push(off);
+                    self.result.vals_offs.copy(off);
                     self.result.vals.copy(source2.vals.index(lower2));
                 }
                 lower2 += 1;
@@ -403,11 +421,12 @@ mod val_batch {
             let (lower, upper) = source.updates_for_value(index);
             for i in lower .. upper {
                 // NB: Here is where we would need to look back if `lower == upper`.
-                let (time, diff) = &source.updates.index(i).into_owned();
+                let time = source.times.index(i);
+                let diff = source.diffs.index(i);
                 use crate::lattice::Lattice;
-                let mut new_time = time.clone();
+                let mut new_time: <L::Target as Update>::Time = time.into_owned();
                 new_time.advance_by(self.description.since().borrow());
-                self.update_stash.push((new_time, diff.clone()));
+                self.update_stash.push((new_time, diff.into_owned()));
             }
         }
 
@@ -418,18 +437,25 @@ mod val_batch {
             if !self.update_stash.is_empty() {
                 // If there is a single element, equal to a just-prior recorded update,
                 // we push nothing and report an unincremented offset to encode this case.
-                if self.update_stash.len() == 1 && self.result.updates.last().map(|ud| self.update_stash.last().unwrap().eq(IntoOwned::borrow_as(ud))).unwrap_or(false) {
-                        // Just clear out update_stash, as we won't drain it here.
+                let time_diff = self.result.times.last().zip(self.result.diffs.last());
+                let last_eq = self.update_stash.last().zip(time_diff).map(|((t1, d1), (t2, d2))| {
+                    let t1 = <<L::TimeContainer as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(t1);
+                    let d1 = <<L::DiffContainer as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(d1);
+                    t1.eq(&t2) && d1.eq(&d2)
+                });
+                if self.update_stash.len() == 1 && last_eq.unwrap_or(false) {
+                    // Just clear out update_stash, as we won't drain it here.
                     self.update_stash.clear();
                     self.singletons += 1;
                 }
                 else {
                     // Conventional; move `update_stash` into `updates`.
-                    for item in self.update_stash.drain(..) {
-                        self.result.updates.push(item);
+                    for (time, diff) in self.update_stash.drain(..) {
+                        self.result.times.push(time);
+                        self.result.diffs.push(diff);
                     }
                 }
-                Some(self.result.updates.len())
+                Some(self.result.times.len())
             } else {
                 None
             }
@@ -449,19 +475,21 @@ mod val_batch {
     impl<L: Layout> Cursor for OrdValCursor<L> {
 
         type Key<'a> = <L::KeyContainer as BatchContainer>::ReadItem<'a>;
-        type KeyOwned = <L::Target as Update>::Key;
         type Val<'a> = <L::ValContainer as BatchContainer>::ReadItem<'a>;
         type Time = <L::Target as Update>::Time;
+        type TimeGat<'a> = <L::TimeContainer as BatchContainer>::ReadItem<'a>;
         type Diff = <L::Target as Update>::Diff;
+        type DiffGat<'a> = <L::DiffContainer as BatchContainer>::ReadItem<'a>;
 
         type Storage = OrdValBatch<L>;
 
         fn key<'a>(&self, storage: &'a OrdValBatch<L>) -> Self::Key<'a> { storage.storage.keys.index(self.key_cursor) }
         fn val<'a>(&self, storage: &'a OrdValBatch<L>) -> Self::Val<'a> { storage.storage.vals.index(self.val_cursor) }
-        fn map_times<L2: FnMut(&Self::Time, &Self::Diff)>(&mut self, storage: &OrdValBatch<L>, mut logic: L2) {
+        fn map_times<L2: FnMut(Self::TimeGat<'_>, Self::DiffGat<'_>)>(&mut self, storage: &OrdValBatch<L>, mut logic: L2) {
             let (lower, upper) = storage.storage.updates_for_value(self.val_cursor);
             for index in lower .. upper {
-                let (time, diff) = &storage.storage.updates.index(index);
+                let time = storage.storage.times.index(index);
+                let diff = storage.storage.diffs.index(index);
                 logic(time, diff);
             }
         }
@@ -477,7 +505,7 @@ mod val_batch {
             }
         }
         fn seek_key(&mut self, storage: &OrdValBatch<L>, key: Self::Key<'_>) {
-            self.key_cursor += storage.storage.keys.advance(self.key_cursor, storage.storage.keys.len(), |x| x.lt(&key));
+            self.key_cursor += storage.storage.keys.advance(self.key_cursor, storage.storage.keys.len(), |x| <L::KeyContainer as BatchContainer>::reborrow(x).lt(&<L::KeyContainer as BatchContainer>::reborrow(key)));
             if self.key_valid(storage) {
                 self.rewind_vals(storage);
             }
@@ -489,7 +517,7 @@ mod val_batch {
             }
         }
         fn seek_val(&mut self, storage: &OrdValBatch<L>, val: Self::Val<'_>) {
-            self.val_cursor += storage.storage.vals.advance(self.val_cursor, storage.storage.values_for_key(self.key_cursor).1, |x| x.lt(&val));
+            self.val_cursor += storage.storage.vals.advance(self.val_cursor, storage.storage.values_for_key(self.key_cursor).1, |x| <L::ValContainer as BatchContainer>::reborrow(x).lt(&<L::ValContainer as BatchContainer>::reborrow(val)));
         }
         fn rewind_keys(&mut self, storage: &OrdValBatch<L>) {
             self.key_cursor = 0;
@@ -528,16 +556,20 @@ mod val_batch {
         /// to recover the singleton to push it into `updates` to join the second update.
         fn push_update(&mut self, time: <L::Target as Update>::Time, diff: <L::Target as Update>::Diff) {
             // If a just-pushed update exactly equals `(time, diff)` we can avoid pushing it.
-            if self.result.updates.last().map(|(t, d)| t == &time && d == &diff) == Some(true) {
+            if self.result.times.last().map(|t| t == <<L::TimeContainer as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(&time)) == Some(true) &&
+               self.result.diffs.last().map(|d| d == <<L::DiffContainer as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(&diff)) == Some(true)
+            {
                 assert!(self.singleton.is_none());
                 self.singleton = Some((time, diff));
             }
             else {
                 // If we have pushed a single element, we need to copy it out to meet this one.
-                if let Some(time_diff) = self.singleton.take() {
-                    self.result.updates.push(time_diff);
+                if let Some((time, diff)) = self.singleton.take() {
+                    self.result.times.push(time);
+                    self.result.diffs.push(diff);
                 }
-                self.result.updates.push((time, diff));
+                self.result.times.push(time);
+                self.result.diffs.push(diff);
             }
         }
     }
@@ -546,8 +578,10 @@ mod val_batch {
     where
         L: Layout,
         CI: for<'a> BuilderInput<L, Time=<L::Target as Update>::Time, Diff=<L::Target as Update>::Diff>,
-        for<'a> CI::Key<'a>: PushInto<L::KeyContainer>,
-        for<'a> CI::Val<'a>: PushInto<L::ValContainer>,
+        for<'a> L::KeyContainer: PushInto<CI::Key<'a>>,
+        for<'a> L::ValContainer: PushInto<CI::Val<'a>>,
+        for<'a> <L::TimeContainer as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = <L::Target as Update>::Time>,
+        for<'a> <L::DiffContainer as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = <L::Target as Update>::Diff>,
     {
 
         type Input = CI;
@@ -562,7 +596,8 @@ mod val_batch {
                     keys_offs: L::OffsetContainer::with_capacity(keys + 1),
                     vals: L::ValContainer::with_capacity(vals),
                     vals_offs: L::OffsetContainer::with_capacity(vals + 1),
-                    updates: L::UpdContainer::with_capacity(upds),
+                    times: L::TimeContainer::with_capacity(upds),
+                    diffs: L::DiffContainer::with_capacity(upds),
                 },
                 singleton: None,
                 singletons: 0,
@@ -581,19 +616,19 @@ mod val_batch {
                         self.push_update(time, diff);
                     } else {
                         // New value; complete representation of prior value.
-                        self.result.vals_offs.push(self.result.updates.len());
+                        self.result.vals_offs.copy(self.result.times.len());
                         if self.singleton.take().is_some() { self.singletons += 1; }
                         self.push_update(time, diff);
-                        val.push_into(&mut self.result.vals);
+                        self.result.vals.push(val);
                     }
                 } else {
                     // New key; complete representation of prior key.
-                    self.result.vals_offs.push(self.result.updates.len());
+                    self.result.vals_offs.copy(self.result.times.len());
                     if self.singleton.take().is_some() { self.singletons += 1; }
-                    self.result.keys_offs.push(self.result.vals.len());
+                    self.result.keys_offs.copy(self.result.vals.len());
                     self.push_update(time, diff);
-                    val.push_into(&mut self.result.vals);
-                    key.push_into(&mut self.result.keys);
+                    self.result.vals.push(val);
+                    self.result.keys.push(key);
                 }
             }
         }
@@ -601,12 +636,12 @@ mod val_batch {
         #[inline(never)]
         fn done(mut self, lower: Antichain<Self::Time>, upper: Antichain<Self::Time>, since: Antichain<Self::Time>) -> OrdValBatch<L> {
             // Record the final offsets
-            self.result.vals_offs.push(self.result.updates.len());
+            self.result.vals_offs.copy(self.result.times.len());
             // Remove any pending singleton, and if it was set increment our count.
             if self.singleton.take().is_some() { self.singletons += 1; }
-            self.result.keys_offs.push(self.result.vals.len());
+            self.result.keys_offs.copy(self.result.vals.len());
             OrdValBatch {
-                updates: self.result.updates.len() + self.singletons,
+                updates: self.result.times.len() + self.singletons,
                 storage: self.result,
                 description: Description::new(lower, upper, since),
             }
@@ -622,7 +657,6 @@ mod key_batch {
     use timely::container::PushInto;
     use timely::progress::{Antichain, frontier::AntichainRef};
 
-    use crate::trace::implementations::containers::Push;
     use crate::trace::{Batch, BatchReader, Builder, Cursor, Description, Merger};
     use crate::trace::implementations::{BatchContainer, BuilderInput};
     use crate::trace::cursor::IntoOwned;
@@ -643,15 +677,17 @@ mod key_batch {
         ///
         /// The length of this list is one longer than `keys`, so that we can avoid bounds logic.
         pub keys_offs: L::OffsetContainer,
-        /// Concatenated ordered lists of updates, bracketed by offsets in `vals_offs`.
-        pub updates: L::UpdContainer,
+        /// Concatenated ordered lists of update times, bracketed by offsets in `vals_offs`.
+        pub times: L::TimeContainer,
+        /// Concatenated ordered lists of update diffs, bracketed by offsets in `vals_offs`.
+        pub diffs: L::DiffContainer,
     }
 
     impl<L: Layout> OrdKeyStorage<L> {
         /// Lower and upper bounds in `self.vals` corresponding to the key at `index`.
         fn updates_for_key(&self, index: usize) -> (usize, usize) {
-            let mut lower = self.keys_offs.index(index).into_owned();
-            let upper = self.keys_offs.index(index+1).into_owned();
+            let mut lower = self.keys_offs.index(index);
+            let upper = self.keys_offs.index(index+1);
             // We use equal lower and upper to encode "singleton update; just before here".
             // It should only apply when there is a prior element, so `lower` should be greater than zero.
             if lower == upper {
@@ -683,10 +719,11 @@ mod key_batch {
     impl<L: Layout> BatchReader for OrdKeyBatch<L> {
         
         type Key<'a> = <L::KeyContainer as BatchContainer>::ReadItem<'a>;
-        type KeyOwned = <L::Target as Update>::Key;
         type Val<'a> = &'a ();
         type Time = <L::Target as Update>::Time;
+        type TimeGat<'a> = <L::TimeContainer as BatchContainer>::ReadItem<'a>;
         type Diff = <L::Target as Update>::Diff;
+        type DiffGat<'a> = <L::DiffContainer as BatchContainer>::ReadItem<'a>;
 
         type Cursor = OrdKeyCursor<L>;
         fn cursor(&self) -> Self::Cursor {
@@ -734,7 +771,9 @@ mod key_batch {
 
     impl<L: Layout> Merger<OrdKeyBatch<L>> for OrdKeyMerger<L>
     where
-        OrdKeyBatch<L>: Batch<Time=<L::Target as Update>::Time>
+        OrdKeyBatch<L>: Batch<Time=<L::Target as Update>::Time>,
+        for<'a> <L::TimeContainer as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = <L::Target as Update>::Time>,
+        for<'a> <L::DiffContainer as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = <L::Target as Update>::Diff>,
     {
         fn new(batch1: &OrdKeyBatch<L>, batch2: &OrdKeyBatch<L>, compaction_frontier: AntichainRef<<L::Target as Update>::Time>) -> Self {
 
@@ -751,11 +790,12 @@ mod key_batch {
             let mut storage = OrdKeyStorage {
                 keys: L::KeyContainer::merge_capacity(&batch1.keys, &batch2.keys),
                 keys_offs: L::OffsetContainer::with_capacity(batch1.keys_offs.len() + batch2.keys_offs.len()),
-                updates: L::UpdContainer::merge_capacity(&batch1.updates, &batch2.updates),
+                times: L::TimeContainer::merge_capacity(&batch1.times, &batch2.times),
+                diffs: L::DiffContainer::merge_capacity(&batch1.diffs, &batch2.diffs),
             };
 
             let keys_offs: &mut L::OffsetContainer = &mut storage.keys_offs;
-            keys_offs.push(0);
+            keys_offs.copy(0);
 
             OrdKeyMerger {
                 key_cursor1: 0,
@@ -768,7 +808,7 @@ mod key_batch {
         }
         fn done(self) -> OrdKeyBatch<L> {
             OrdKeyBatch {
-                updates: self.result.updates.len() + self.singletons,
+                updates: self.result.times.len() + self.singletons,
                 storage: self.result,
                 description: self.description,
             }
@@ -776,14 +816,14 @@ mod key_batch {
         fn work(&mut self, source1: &OrdKeyBatch<L>, source2: &OrdKeyBatch<L>, fuel: &mut isize) {
 
             // An (incomplete) indication of the amount of work we've done so far.
-            let starting_updates = self.result.updates.len();
+            let starting_updates = self.result.times.len();
             let mut effort = 0isize;
 
             // While both mergees are still active, perform single-key merges.
             while self.key_cursor1 < source1.storage.keys.len() && self.key_cursor2 < source2.storage.keys.len() && effort < *fuel {
                 self.merge_key(&source1.storage, &source2.storage);
                 // An (incomplete) accounting of the work we've done.
-                effort = (self.result.updates.len() - starting_updates) as isize;
+                effort = (self.result.times.len() - starting_updates) as isize;
             }
 
             // Merging is complete, and only copying remains.
@@ -791,12 +831,12 @@ mod key_batch {
             while self.key_cursor1 < source1.storage.keys.len() && effort < *fuel {
                 self.copy_key(&source1.storage, self.key_cursor1);
                 self.key_cursor1 += 1;
-                effort = (self.result.updates.len() - starting_updates) as isize;
+                effort = (self.result.times.len() - starting_updates) as isize;
             }
             while self.key_cursor2 < source2.storage.keys.len() && effort < *fuel {
                 self.copy_key(&source2.storage, self.key_cursor2);
                 self.key_cursor2 += 1;
-                effort = (self.result.updates.len() - starting_updates) as isize;
+                effort = (self.result.times.len() - starting_updates) as isize;
             }
 
             *fuel -= effort;
@@ -815,7 +855,7 @@ mod key_batch {
         fn copy_key(&mut self, source: &OrdKeyStorage<L>, cursor: usize) {
             self.stash_updates_for_key(source, cursor);
             if let Some(off) = self.consolidate_updates() {
-                self.result.keys_offs.push(off);
+                self.result.keys_offs.copy(off);
                 self.result.keys.copy(source.keys.index(cursor));
             }
         }
@@ -835,7 +875,7 @@ mod key_batch {
                     self.stash_updates_for_key(source1, self.key_cursor1);
                     self.stash_updates_for_key(source2, self.key_cursor2);
                     if let Some(off) = self.consolidate_updates() {
-                        self.result.keys_offs.push(off);
+                        self.result.keys_offs.copy(off);
                         self.result.keys.copy(source1.keys.index(self.key_cursor1));
                     }
                     // Increment cursors in either case; the keys are merged.
@@ -854,11 +894,12 @@ mod key_batch {
             let (lower, upper) = source.updates_for_key(index);
             for i in lower .. upper {
                 // NB: Here is where we would need to look back if `lower == upper`.
-                let (time, diff) = &source.updates.index(i);
+                let time = source.times.index(i);
+                let diff = source.diffs.index(i);
                 use crate::lattice::Lattice;
-                let mut new_time = time.clone();
+                let mut new_time = time.into_owned();
                 new_time.advance_by(self.description.since().borrow());
-                self.update_stash.push((new_time, diff.clone()));
+                self.update_stash.push((new_time, diff.into_owned()));
             }
         }
 
@@ -869,18 +910,25 @@ mod key_batch {
             if !self.update_stash.is_empty() {
                 // If there is a single element, equal to a just-prior recorded update,
                 // we push nothing and report an unincremented offset to encode this case.
-                if self.update_stash.len() == 1 && self.update_stash.last() == self.result.updates.last() {
+                let time_diff = self.result.times.last().zip(self.result.diffs.last());
+                let last_eq = self.update_stash.last().zip(time_diff).map(|((t1, d1), (t2, d2))| {
+                    let t1 = <<L::TimeContainer as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(t1);
+                    let d1 = <<L::DiffContainer as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(d1);
+                    t1.eq(&t2) && d1.eq(&d2)
+                });
+                if self.update_stash.len() == 1 && last_eq.unwrap_or(false) {
                     // Just clear out update_stash, as we won't drain it here.
                     self.update_stash.clear();
                     self.singletons += 1;
                 }
                 else {
                     // Conventional; move `update_stash` into `updates`.
-                    for item in self.update_stash.drain(..) {
-                        self.result.updates.push(item);
+                    for (time, diff) in self.update_stash.drain(..) {
+                        self.result.times.push(time);
+                        self.result.diffs.push(diff);
                     }
                 }
-                Some(self.result.updates.len())
+                Some(self.result.times.len())
             } else {
                 None
             }
@@ -898,21 +946,22 @@ mod key_batch {
     }
 
     impl<L: Layout> Cursor for OrdKeyCursor<L> {
-
         type Key<'a> = <L::KeyContainer as BatchContainer>::ReadItem<'a>;
-        type KeyOwned = <L::Target as Update>::Key;
         type Val<'a> = &'a ();
         type Time = <L::Target as Update>::Time;
+        type TimeGat<'a> = <L::TimeContainer as BatchContainer>::ReadItem<'a>;
         type Diff = <L::Target as Update>::Diff;
+        type DiffGat<'a> = <L::DiffContainer as BatchContainer>::ReadItem<'a>;
 
         type Storage = OrdKeyBatch<L>;
 
         fn key<'a>(&self, storage: &'a Self::Storage) -> Self::Key<'a> { storage.storage.keys.index(self.key_cursor) }
         fn val<'a>(&self, _storage: &'a Self::Storage) -> &'a () { &() }
-        fn map_times<L2: FnMut(&Self::Time, &Self::Diff)>(&mut self, storage: &Self::Storage, mut logic: L2) {
+        fn map_times<L2: FnMut(Self::TimeGat<'_>, Self::DiffGat<'_>)>(&mut self, storage: &Self::Storage, mut logic: L2) {
             let (lower, upper) = storage.storage.updates_for_key(self.key_cursor);
             for index in lower .. upper {
-                let (time, diff) = &storage.storage.updates.index(index);
+                let time = storage.storage.times.index(index);
+                let diff = storage.storage.diffs.index(index);
                 logic(time, diff);
             }
         }
@@ -928,7 +977,7 @@ mod key_batch {
             }
         }
         fn seek_key(&mut self, storage: &Self::Storage, key: Self::Key<'_>) {
-            self.key_cursor += storage.storage.keys.advance(self.key_cursor, storage.storage.keys.len(), |x| x.lt(&key));
+            self.key_cursor += storage.storage.keys.advance(self.key_cursor, storage.storage.keys.len(), |x| <L::KeyContainer as BatchContainer>::reborrow(x).lt(&<L::KeyContainer as BatchContainer>::reborrow(key)));
             if self.key_valid(storage) {
                 self.rewind_vals(storage);
             }
@@ -974,16 +1023,20 @@ mod key_batch {
         /// to recover the singleton to push it into `updates` to join the second update.
         fn push_update(&mut self, time: <L::Target as Update>::Time, diff: <L::Target as Update>::Diff) {
             // If a just-pushed update exactly equals `(time, diff)` we can avoid pushing it.
-            if self.result.updates.last().map(|(t, d)| t == &time && d == &diff) == Some(true) {
+            let t1 = <<L::TimeContainer as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(&time);
+            let d1 = <<L::DiffContainer as BatchContainer>::ReadItem<'_> as IntoOwned>::borrow_as(&diff);
+            if self.result.times.last().map(|t| t == t1).unwrap_or(false) && self.result.diffs.last().map(|d| d == d1).unwrap_or(false) {
                 assert!(self.singleton.is_none());
                 self.singleton = Some((time, diff));
             }
             else {
                 // If we have pushed a single element, we need to copy it out to meet this one.
-                if let Some(time_diff) = self.singleton.take() {
-                    self.result.updates.push(time_diff);
+                if let Some((time, diff)) = self.singleton.take() {
+                    self.result.times.push(time);
+                    self.result.diffs.push(diff);
                 }
-                self.result.updates.push((time, diff));
+                self.result.times.push(time);
+                self.result.diffs.push(diff);
             }
         }
     }
@@ -992,7 +1045,9 @@ mod key_batch {
     where
         L: Layout,
         CI: for<'a> BuilderInput<L, Time=<L::Target as Update>::Time, Diff=<L::Target as Update>::Diff>,
-        for<'a> CI::Key<'a>: PushInto<L::KeyContainer>,
+        for<'a> L::KeyContainer: PushInto<CI::Key<'a>>,
+        for<'a> <L::TimeContainer as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = <L::Target as Update>::Time>,
+        for<'a> <L::DiffContainer as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = <L::Target as Update>::Diff>,
     {
 
         type Input = CI;
@@ -1005,7 +1060,8 @@ mod key_batch {
                 result: OrdKeyStorage {
                     keys: L::KeyContainer::with_capacity(keys),
                     keys_offs: L::OffsetContainer::with_capacity(keys + 1),
-                    updates: L::UpdContainer::with_capacity(upds),
+                    times: L::TimeContainer::with_capacity(upds),
+                    diffs: L::DiffContainer::with_capacity(upds),
                 },
                 singleton: None,
                 singletons: 0,
@@ -1022,11 +1078,11 @@ mod key_batch {
                     self.push_update(time, diff);
                 } else {
                     // New key; complete representation of prior key.
-                    self.result.keys_offs.push(self.result.updates.len());
+                    self.result.keys_offs.copy(self.result.times.len());
                     // Remove any pending singleton, and if it was set increment our count.
                     if self.singleton.take().is_some() { self.singletons += 1; }
                     self.push_update(time, diff);
-                    key.push_into(&mut self.result.keys);
+                    self.result.keys.push(key);
                 }
             }
         }
@@ -1034,11 +1090,11 @@ mod key_batch {
         #[inline(never)]
         fn done(mut self, lower: Antichain<Self::Time>, upper: Antichain<Self::Time>, since: Antichain<Self::Time>) -> OrdKeyBatch<L> {
             // Record the final offsets
-            self.result.keys_offs.push(self.result.updates.len());
+            self.result.keys_offs.copy(self.result.times.len());
             // Remove any pending singleton, and if it was set increment our count.
             if self.singleton.take().is_some() { self.singletons += 1; }
             OrdKeyBatch {
-                updates: self.result.updates.len() + self.singletons,
+                updates: self.result.times.len() + self.singletons,
                 storage: self.result,
                 description: Description::new(lower, upper, since),
             }

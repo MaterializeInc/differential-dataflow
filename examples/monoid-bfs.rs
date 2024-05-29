@@ -18,13 +18,15 @@ pub struct MinSum {
     value: u32,
 }
 
-use differential_dataflow::difference::{Semigroup, Multiply};
+use differential_dataflow::difference::{IsZero, Semigroup, Multiply};
 
+impl IsZero for MinSum {
+    fn is_zero(&self) -> bool { false }
+}
 impl Semigroup for MinSum {
     fn plus_equals(&mut self, rhs: &Self) {
         self.value = std::cmp::min(self.value, rhs.value);
     }
-    fn is_zero(&self) -> bool { false }
 }
 
 impl Multiply<Self> for MinSum {
@@ -145,7 +147,7 @@ where G::Timestamp: Lattice+Ord {
             .join_map(&edges, |_k,&(),d| *d)
             .concat(&roots)
             .map(|x| (x,()))
-            .reduce_core::<_,_,KeySpine<_,_,_>>("Reduce", Clone::clone, |_key, input, output, updates| {
+            .reduce_core::<_,KeySpine<_,_,_>>("Reduce", |_key, input, output, updates| {
                 if output.is_empty() || input[0].1 < output[0].1 {
                     updates.push(((), input[0].1));
                 }

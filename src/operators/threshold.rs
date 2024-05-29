@@ -15,13 +15,14 @@ use crate::hashable::Hashable;
 use crate::collection::AsCollection;
 use crate::operators::arrange::{Arranged, ArrangeBySelf};
 use crate::trace::{BatchReader, Cursor, TraceReader};
+use crate::trace::cursor::IntoOwned;
 
 /// Extension trait for the `distinct` differential dataflow method.
 pub trait ThresholdTotal<G: Scope, K: ExchangeData, R: ExchangeData+Semigroup> where G::Timestamp: TotalOrder+Lattice+Ord {
     /// Reduces the collection to one occurrence of each distinct element.
     fn threshold_semigroup<R2, F>(&self, thresh: F) -> Collection<G, K, R2>
     where
-        R2: Semigroup,
+        R2: Semigroup+'static,
         F: FnMut(&K,&R,Option<&R>)->Option<R2>+'static,
         ;
     /// Reduces the collection to one occurrence of each distinct element.
@@ -39,10 +40,14 @@ pub trait ThresholdTotal<G: Scope, K: ExchangeData, R: ExchangeData+Semigroup> w
     ///          .threshold_total(|_,c| c % 2);
     /// });
     /// ```
-    fn threshold_total<R2: Abelian, F: FnMut(&K,&R)->R2+'static>(&self, mut thresh: F) -> Collection<G, K, R2> {
+    fn threshold_total<R2: Abelian+'static, F: FnMut(&K,&R)->R2+'static>(&self, mut thresh: F) -> Collection<G, K, R2> {
         self.threshold_semigroup(move |key, new, old| {
             let mut new = thresh(key, new);
-            if let Some(old) = old { new.plus_equals(&thresh(key, old).negate()); }
+            if let Some(old) = old { 
+                let mut add = thresh(key, old);
+                add.negate();
+                new.plus_equals(&add); 
+            }
             if !new.is_zero() { Some(new) } else { None }
         })
     }
@@ -74,7 +79,7 @@ pub trait ThresholdTotal<G: Scope, K: ExchangeData, R: ExchangeData+Semigroup> w
     /// This method allows `distinct` to produce collections whose difference
     /// type is something other than an `isize` integer, for example perhaps an
     /// `i32`.
-    fn distinct_total_core<R2: Abelian+From<i8>>(&self) -> Collection<G, K, R2> {
+    fn distinct_total_core<R2: Abelian+From<i8>+'static>(&self) -> Collection<G, K, R2> {
         self.threshold_total(|_,_| R2::from(1i8))
     }
 
@@ -84,7 +89,7 @@ impl<G: Scope, K: ExchangeData+Hashable, R: ExchangeData+Semigroup> ThresholdTot
 where G::Timestamp: TotalOrder+Lattice+Ord {
     fn threshold_semigroup<R2, F>(&self, thresh: F) -> Collection<G, K, R2>
     where
-        R2: Semigroup,
+        R2: Semigroup+'static,
         F: FnMut(&K,&R,Option<&R>)->Option<R2>+'static,
     {
         self.arrange_by_self_named("Arrange: ThresholdTotal")
@@ -96,13 +101,14 @@ impl<G, K, T1> ThresholdTotal<G, K, T1::Diff> for Arranged<G, T1>
 where
     G: Scope<Timestamp=T1::Time>,
     T1: for<'a> TraceReader<Key<'a>=&'a K, Val<'a>=&'a ()>+Clone+'static,
+    for<'a> T1::Diff : Semigroup<T1::DiffGat<'a>>,
     K: ExchangeData,
     T1::Time: TotalOrder,
     T1::Diff: ExchangeData,
 {
     fn threshold_semigroup<R2, F>(&self, mut thresh: F) -> Collection<G, K, R2>
     where
-        R2: Semigroup,
+        R2: Semigroup+'static,
         F: for<'a> FnMut(T1::Key<'a>,&T1::Diff,Option<&T1::Diff>)->Option<R2>+'static,
     {
 
@@ -133,8 +139,8 @@ where
                             trace_cursor.seek_key(&trace_storage, key);
                             if trace_cursor.get_key(&trace_storage) == Some(key) {
                                 trace_cursor.map_times(&trace_storage, |_, diff| {
-                                    count.as_mut().map(|c| c.plus_equals(diff));
-                                    if count.is_none() { count = Some(diff.clone()); }
+                                    count.as_mut().map(|c| c.plus_equals(&diff));
+                                    if count.is_none() { count = Some(diff.into_owned()); }
                                 });
                             }
 
@@ -146,23 +152,23 @@ where
                                 match &count {
                                     Some(old) => {
                                         let mut temp = old.clone();
-                                        temp.plus_equals(diff);
+                                        temp.plus_equals(&diff);
                                         thresh(key, &temp, Some(old))
                                     },
-                                    None => { thresh(key, diff, None) },
+                                    None => { thresh(key, &diff.into_owned(), None) },
                                 };
 
                                 // Either add or assign `diff` to `count`.
                                 if let Some(count) = &mut count {
-                                    count.plus_equals(diff);
+                                    count.plus_equals(&diff);
                                 }
                                 else {
-                                    count = Some(diff.clone());
+                                    count = Some(diff.into_owned());
                                 }
 
                                 if let Some(difference) = difference {
                                     if !difference.is_zero() {
-                                        session.give((key.clone(), time.clone(), difference));
+                                        session.give((key.clone(), time.into_owned(), difference));
                                     }
                                 }
                             });

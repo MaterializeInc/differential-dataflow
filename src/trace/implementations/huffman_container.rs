@@ -1,6 +1,7 @@
 //! A slice container that Huffman encodes its contents.
 
 use std::collections::BTreeMap;
+use timely::container::PushInto;
 
 use crate::trace::implementations::{BatchContainer, OffsetList};
 
@@ -32,9 +33,8 @@ where
     }
 }
 
-use crate::trace::implementations::containers::Push;
-impl<B: Ord + Clone + 'static> Push<Vec<B>> for HuffmanContainer<B> {
-    fn push(&mut self, item: Vec<B>) {
+impl<B: Ord + Clone + 'static> PushInto<Vec<B>> for HuffmanContainer<B> {
+    fn push_into(&mut self, item: Vec<B>) {
         for x in item.iter() { *self.stats.entry(x.clone()).or_insert(0) += 1; }
         match &mut self.inner {
             Ok((huffman, bytes)) => {
@@ -50,8 +50,10 @@ impl<B: Ord + Clone + 'static> Push<Vec<B>> for HuffmanContainer<B> {
 }
 
 impl<B: Ord + Clone + 'static> BatchContainer for HuffmanContainer<B> {
-    type OwnedItem = Vec<B>;
+    type Owned = Vec<B>;
     type ReadItem<'a> = Wrapped<'a, B>;
+
+    fn reborrow<'b, 'a: 'b>(item: Self::ReadItem<'a>) -> Self::ReadItem<'b> { item }
 
     fn copy(&mut self, item: Self::ReadItem<'_>) {
         match item.decode() {
@@ -211,7 +213,7 @@ mod wrapper {
                 Err(bytes) => bytes.to_vec(),
             }
         }
-        fn clone_onto(&self, other: &mut Self::Owned) {
+        fn clone_onto(self, other: &mut Self::Owned) {
             other.clear();
             match self.decode() {
                 Ok(decode) => other.extend(decode.cloned()),

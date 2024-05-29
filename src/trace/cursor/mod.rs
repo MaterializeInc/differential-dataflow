@@ -13,45 +13,23 @@ pub mod cursor_list;
 
 pub use self::cursor_list::CursorList;
 
-use std::borrow::Borrow;
-
-/// A reference type corresponding to an owned type, supporting conversion in each direction.
-///
-/// This trait can be implemented by a GAT, and enables owned types to be borrowed as a GAT.
-/// This trait is analogous to `ToOwned`, but not as prescriptive. Specifically, it avoids the
-/// requirement that the other trait implement `Borrow`, for which a borrow must result in a
-/// `&'self Borrowed`, which cannot move the lifetime into a GAT borrowed type.
-pub trait IntoOwned<'a> {
-    /// Owned type into which this type can be converted.
-    type Owned;
-    /// Conversion from an instance of this type to the owned type.
-    fn into_owned(self) -> Self::Owned;
-    /// Clones `self` onto an existing instance of the owned type.
-    fn clone_onto(&self, other: &mut Self::Owned); 
-    /// Borrows an owned instance as oneself.
-    fn borrow_as(owned: &'a Self::Owned) -> Self;
-}
-
-impl<'a, T: ToOwned+?Sized> IntoOwned<'a> for &'a T {
-    type Owned = T::Owned;
-    fn into_owned(self) -> Self::Owned { self.to_owned() }
-    fn clone_onto(&self, other: &mut Self::Owned) { <T as ToOwned>::clone_into(self, other) }
-    fn borrow_as(owned: &'a Self::Owned) -> Self { owned.borrow() }
-}
+pub use timely::container::flatcontainer::IntoOwned;
 
 /// A cursor for navigating ordered `(key, val, time, diff)` updates.
 pub trait Cursor {
 
     /// Key by which updates are indexed.
-    type Key<'a>: Copy + Clone + Ord + IntoOwned<'a, Owned = Self::KeyOwned>;
-    /// Owned version of the above.
-    type KeyOwned: Ord + Clone;
+    type Key<'a>: Copy + Clone + Ord;
     /// Values associated with keys.
-    type Val<'a>: Copy + Clone + Ord + IntoOwned<'a> + for<'b> PartialOrd<Self::Val<'b>>;
+    type Val<'a>: Copy + Clone + Ord;
     /// Timestamps associated with updates
     type Time: Timestamp + Lattice + Ord + Clone;
-    /// Associated update.
-    type Diff: Semigroup + ?Sized;
+    /// Borrowed form of timestamp.
+    type TimeGat<'a>: Copy + IntoOwned<'a, Owned = Self::Time>;
+    /// Owned form of update difference.
+    type Diff: Semigroup + 'static;
+    /// Borrowed form of update difference.
+    type DiffGat<'a> : Copy + IntoOwned<'a, Owned = Self::Diff>;
 
     /// Storage required by the cursor.
     type Storage;
@@ -81,7 +59,7 @@ pub trait Cursor {
 
     /// Applies `logic` to each pair of time and difference. Intended for mutation of the
     /// closure's scope.
-    fn map_times<L: FnMut(&Self::Time, &Self::Diff)>(&mut self, storage: &Self::Storage, logic: L);
+    fn map_times<L: FnMut(Self::TimeGat<'_>, Self::DiffGat<'_>)>(&mut self, storage: &Self::Storage, logic: L);
 
     /// Advances the cursor to the next key.
     fn step_key(&mut self, storage: &Self::Storage);
@@ -99,9 +77,10 @@ pub trait Cursor {
     fn rewind_vals(&mut self, storage: &Self::Storage);
 
     /// Rewinds the cursor and outputs its contents to a Vec
-    fn to_vec<V, F>(&mut self, from: F, storage: &Self::Storage) -> Vec<((Self::KeyOwned, V), Vec<(Self::Time, Self::Diff)>)>
+    fn to_vec<K, V>(&mut self, storage: &Self::Storage) -> Vec<((K, V), Vec<(Self::Time, Self::Diff)>)>
     where 
-        F: Fn(Self::Val<'_>) -> V,
+        for<'a> Self::Key<'a> : IntoOwned<'a, Owned = K>,
+        for<'a> Self::Val<'a> : IntoOwned<'a, Owned = V>,
     {
         let mut out = Vec::new();
         self.rewind_keys(storage);
@@ -110,9 +89,9 @@ pub trait Cursor {
             while self.val_valid(storage) {
                 let mut kv_out = Vec::new();
                 self.map_times(storage, |ts, r| {
-                    kv_out.push((ts.clone(), r.clone()));
+                    kv_out.push((ts.into_owned(), r.into_owned()));
                 });
-                out.push(((self.key(storage).into_owned(), from(self.val(storage))), kv_out));
+                out.push(((self.key(storage).into_owned(), self.val(storage).into_owned()), kv_out));
                 self.step_val(storage);
             }
             self.step_key(storage);

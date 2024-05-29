@@ -80,10 +80,11 @@ pub struct TraceRc<Tr: TraceReader> {
 
 impl<Tr: TraceReader> TraceReader for TraceRc<Tr> {
     type Key<'a> = Tr::Key<'a>;
-    type KeyOwned = Tr::KeyOwned;
     type Val<'a> = Tr::Val<'a>;
     type Time = Tr::Time;
+    type TimeGat<'a> = Tr::TimeGat<'a>;
     type Diff = Tr::Diff;
+    type DiffGat<'a> = Tr::DiffGat<'a>;
 
     type Batch = Tr::Batch;
     type Storage = Tr::Storage;

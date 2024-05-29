@@ -44,7 +44,7 @@ impl<G, P, R> ProposeExtensionMethod<G, P, R> for Collection<G, P, R>
 where
     G: Scope,
     P: ExchangeData+Ord,
-    R: Monoid+Multiply<Output = R>,
+    R: Monoid+Multiply<Output = R>+'static,
 {
     fn propose_using<PE>(&self, extender: &mut PE) -> Collection<G, (P, PE::Extension), R>
     where
@@ -199,7 +199,7 @@ where
 
     fn propose(&mut self, prefixes: &Collection<G, P, R>) -> Collection<G, (P, V), R> {
         let propose = self.indices.propose_trace.import(&prefixes.scope());
-        operators::propose::propose(prefixes, propose, self.key_selector.clone(), |x| x.clone())
+        operators::propose::propose(prefixes, propose, self.key_selector.clone())
     }
 
     fn validate(&mut self, extensions: &Collection<G, (P, V), R>) -> Collection<G, (P, V), R> {

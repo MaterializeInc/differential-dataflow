@@ -5,9 +5,11 @@ use timely::dataflow::*;
 use timely::dataflow::operators::Operator;
 use timely::dataflow::channels::pact::Pipeline;
 
+use crate::trace::cursor::IntoOwned;
+
 use crate::lattice::Lattice;
 use crate::{ExchangeData, Collection};
-use crate::difference::Semigroup;
+use crate::difference::{IsZero, Semigroup};
 use crate::hashable::Hashable;
 use crate::collection::AsCollection;
 use crate::operators::arrange::{Arranged, ArrangeBySelf};
@@ -39,26 +41,28 @@ pub trait CountTotal<G: Scope, K: ExchangeData, R: Semigroup> where G::Timestamp
     /// This method allows `count_total` to produce collections whose difference
     /// type is something other than an `isize` integer, for example perhaps an
     /// `i32`.
-    fn count_total_core<R2: Semigroup + From<i8>>(&self) -> Collection<G, (K, R), R2>;
+    fn count_total_core<R2: Semigroup + From<i8> + 'static>(&self) -> Collection<G, (K, R), R2>;
 }
 
 impl<G: Scope, K: ExchangeData+Hashable, R: ExchangeData+Semigroup> CountTotal<G, K, R> for Collection<G, K, R>
 where G::Timestamp: TotalOrder+Lattice+Ord {
-    fn count_total_core<R2: Semigroup + From<i8>>(&self) -> Collection<G, (K, R), R2> {
+    fn count_total_core<R2: Semigroup + From<i8> + 'static>(&self) -> Collection<G, (K, R), R2> {
         self.arrange_by_self_named("Arrange: CountTotal")
             .count_total_core()
     }
 }
 
-impl<G, T1> CountTotal<G, T1::KeyOwned, T1::Diff> for Arranged<G, T1>
+impl<G, K, T1> CountTotal<G, K, T1::Diff> for Arranged<G, T1>
 where
     G: Scope<Timestamp=T1::Time>,
     T1: for<'a> TraceReader<Val<'a>=&'a ()>+Clone+'static,
-    T1::KeyOwned: ExchangeData,
+    for<'a> T1::Key<'a>: IntoOwned<'a, Owned = K>,
+    for<'a> T1::Diff : Semigroup<T1::DiffGat<'a>>,
+    K: ExchangeData,
     T1::Time: TotalOrder,
     T1::Diff: ExchangeData,
 {
-    fn count_total_core<R2: Semigroup + From<i8>>(&self) -> Collection<G, (T1::KeyOwned, T1::Diff), R2> {
+    fn count_total_core<R2: Semigroup + From<i8> + 'static>(&self) -> Collection<G, (K, T1::Diff), R2> {
 
         let mut trace = self.trace.clone();
         let mut buffer = Vec::new();
@@ -85,8 +89,8 @@ where
                             trace_cursor.seek_key(&trace_storage, key);
                             if trace_cursor.get_key(&trace_storage) == Some(key) {
                                 trace_cursor.map_times(&trace_storage, |_, diff| {
-                                    count.as_mut().map(|c| c.plus_equals(diff));
-                                    if count.is_none() { count = Some(diff.clone()); }
+                                    count.as_mut().map(|c| c.plus_equals(&diff));
+                                    if count.is_none() { count = Some(diff.into_owned()); }
                                 });
                             }
 
@@ -94,14 +98,14 @@ where
 
                                 if let Some(count) = count.as_ref() {
                                     if !count.is_zero() {
-                                        session.give(((key.into_owned(), count.clone()), time.clone(), R2::from(-1i8)));
+                                        session.give(((key.into_owned(), count.clone()), time.into_owned(), R2::from(-1i8)));
                                     }
                                 }
-                                count.as_mut().map(|c| c.plus_equals(diff));
-                                if count.is_none() { count = Some(diff.clone()); }
+                                count.as_mut().map(|c| c.plus_equals(&diff));
+                                if count.is_none() { count = Some(diff.into_owned()); }
                                 if let Some(count) = count.as_ref() {
                                     if !count.is_zero() {
-                                        session.give(((key.into_owned(), count.clone()), time.clone(), R2::from(1i8)));
+                                        session.give(((key.into_owned(), count.clone()), time.into_owned(), R2::from(1i8)));
                                     }
                                 }
                             });
