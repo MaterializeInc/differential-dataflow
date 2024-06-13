@@ -10,10 +10,13 @@
 
 use std::rc::Rc;
 use timely::container::columnation::{TimelyStack};
+use timely::container::flatcontainer::{Containerized, FlatStack};
+use crate::trace::implementations::chunker::{ColumnationChunker, ContainerChunker, VecChunker};
 
 use crate::trace::implementations::spine_fueled::Spine;
 use crate::trace::implementations::merge_batcher::{MergeBatcher, VecMerger};
 use crate::trace::implementations::merge_batcher_col::ColumnationMerger;
+use crate::trace::implementations::merge_batcher_flat::FlatcontainerMerger;
 use crate::trace::rc_blanket_impls::RcBuilder;
 
 use super::{Update, Layout, Vector, TStack, Preferred, FlatLayout};
@@ -24,7 +27,7 @@ pub use self::key_batch::{OrdKeyBatch, OrdKeyBuilder};
 /// A trace implementation using a spine of ordered lists.
 pub type OrdValSpine<K, V, T, R> = Spine<
     Rc<OrdValBatch<Vector<((K,V),T,R)>>>,
-    MergeBatcher<VecMerger<((K, V), T, R)>, T>,
+    MergeBatcher<Vec<((K,V),T,R)>, VecChunker<((K,V),T,R)>, VecMerger<((K, V), T, R)>, T>,
     RcBuilder<OrdValBuilder<Vector<((K,V),T,R)>, Vec<((K,V),T,R)>>>,
 >;
 // /// A trace implementation for empty values using a spine of ordered lists.
@@ -33,21 +36,26 @@ pub type OrdValSpine<K, V, T, R> = Spine<
 /// A trace implementation backed by columnar storage.
 pub type ColValSpine<K, V, T, R> = Spine<
     Rc<OrdValBatch<TStack<((K,V),T,R)>>>,
-    MergeBatcher<ColumnationMerger<((K,V),T,R)>, T>,
+    MergeBatcher<Vec<((K,V),T,R)>, ColumnationChunker<((K,V),T,R)>, ColumnationMerger<((K,V),T,R)>, T>,
     RcBuilder<OrdValBuilder<TStack<((K,V),T,R)>, TimelyStack<((K,V),T,R)>>>,
 >;
 
 /// A trace implementation backed by flatcontainer storage.
-pub type FlatValSpine<K, V, T, R> = Spine<
+pub type FlatValSpine<K, V, T, R, C> = Spine<
     Rc<OrdValBatch<FlatLayout<((K,V),T,R)>>>,
-    MergeBatcher<ColumnationMerger<((K,V),T,R)>, T>,
-    RcBuilder<OrdValBuilder<FlatLayout<((K,V),T,R)>, TimelyStack<((K,V),T,R)>>>,
+    MergeBatcher<
+        C,
+        ContainerChunker<FlatStack<<((K,V),T,R) as Containerized>::Region>>,
+        FlatcontainerMerger<T, R, <((K,V),T,R) as Containerized>::Region>,
+        T,
+    >,
+    RcBuilder<OrdValBuilder<FlatLayout<((K,V),T,R)>, FlatStack<<((K,V),T,R) as Containerized>::Region>>>,
 >;
 
 /// A trace implementation using a spine of ordered lists.
 pub type OrdKeySpine<K, T, R> = Spine<
     Rc<OrdKeyBatch<Vector<((K,()),T,R)>>>,
-    MergeBatcher<VecMerger<((K, ()), T, R)>, T>,
+    MergeBatcher<Vec<((K,()),T,R)>, VecChunker<((K,()),T,R)>, VecMerger<((K, ()), T, R)>, T>,
     RcBuilder<OrdKeyBuilder<Vector<((K,()),T,R)>, Vec<((K,()),T,R)>>>,
 >;
 // /// A trace implementation for empty values using a spine of ordered lists.
@@ -56,21 +64,26 @@ pub type OrdKeySpine<K, T, R> = Spine<
 /// A trace implementation backed by columnar storage.
 pub type ColKeySpine<K, T, R> = Spine<
     Rc<OrdKeyBatch<TStack<((K,()),T,R)>>>,
-    MergeBatcher<ColumnationMerger<((K,()),T,R)>, T>,
+    MergeBatcher<Vec<((K,()),T,R)>, ColumnationChunker<((K,()),T,R)>, ColumnationMerger<((K,()),T,R)>, T>,
     RcBuilder<OrdKeyBuilder<TStack<((K,()),T,R)>, TimelyStack<((K,()),T,R)>>>,
 >;
 
 /// A trace implementation backed by flatcontainer storage.
-pub type FlatKeySpine<K, T, R> = Spine<
-    Rc<OrdValBatch<FlatLayout<((K,()),T,R)>>>,
-    MergeBatcher<ColumnationMerger<((K,()),T,R)>, T>,
-    RcBuilder<OrdValBuilder<FlatLayout<((K,()),T,R)>, TimelyStack<((K,()),T,R)>>>,
+pub type FlatKeySpine<K, T, R, C> = Spine<
+    Rc<OrdKeyBatch<FlatLayout<((K,()),T,R)>>>,
+    MergeBatcher<
+        C,
+        ContainerChunker<FlatStack<<((K,()),T,R) as Containerized>::Region>>,
+        FlatcontainerMerger<T, R, <((K,()),T,R) as Containerized>::Region>,
+        T,
+    >,
+    RcBuilder<OrdKeyBuilder<FlatLayout<((K,()),T,R)>, FlatStack<<((K,()),T,R) as Containerized>::Region>>>,
 >;
 
 /// A trace implementation backed by columnar storage.
 pub type PreferredSpine<K, V, T, R> = Spine<
     Rc<OrdValBatch<Preferred<K,V,T,R>>>,
-    MergeBatcher<ColumnationMerger<((<K as ToOwned>::Owned,<V as ToOwned>::Owned),T,R)>,T>,
+    MergeBatcher<Vec<((<K as ToOwned>::Owned,<V as ToOwned>::Owned),T,R)>, ColumnationChunker<((<K as ToOwned>::Owned,<V as ToOwned>::Owned),T,R)>, ColumnationMerger<((<K as ToOwned>::Owned,<V as ToOwned>::Owned),T,R)>,T>,
     RcBuilder<OrdValBuilder<Preferred<K,V,T,R>, TimelyStack<((<K as ToOwned>::Owned,<V as ToOwned>::Owned),T,R)>>>,
 >;
 
@@ -236,9 +249,9 @@ mod val_batch {
 
             // Mark explicit types because type inference fails to resolve it.
             let keys_offs: &mut L::OffsetContainer = &mut storage.keys_offs;
-            keys_offs.copy(0);
+            keys_offs.push(0);
             let vals_offs: &mut L::OffsetContainer = &mut storage.vals_offs;
-            vals_offs.copy(0);
+            vals_offs.push(0);
 
             OrdValMerger {
                 key_cursor1: 0,
@@ -302,16 +315,16 @@ mod val_batch {
             while lower < upper {
                 self.stash_updates_for_val(source, lower);
                 if let Some(off) = self.consolidate_updates() {
-                    self.result.vals_offs.copy(off);
-                    self.result.vals.copy(source.vals.index(lower));
+                    self.result.vals_offs.push(off);
+                    self.result.vals.push(source.vals.index(lower));
                 }
                 lower += 1;
             }            
 
             // If we have pushed any values, copy the key as well.
             if self.result.vals.len() > init_vals {
-                self.result.keys.copy(source.keys.index(cursor));
-                self.result.keys_offs.copy(self.result.vals.len());
+                self.result.keys.push(source.keys.index(cursor));
+                self.result.keys_offs.push(self.result.vals.len());
             }           
         }
         /// Merge the next key in each of `source1` and `source2` into `self`, updating the appropriate cursors.
@@ -330,8 +343,8 @@ mod val_batch {
                     let (lower1, upper1) = source1.values_for_key(self.key_cursor1);
                     let (lower2, upper2) = source2.values_for_key(self.key_cursor2);
                     if let Some(off) = self.merge_vals((source1, lower1, upper1), (source2, lower2, upper2)) {
-                        self.result.keys.copy(source1.keys.index(self.key_cursor1));
-                        self.result.keys_offs.copy(off);
+                        self.result.keys.push(source1.keys.index(self.key_cursor1));
+                        self.result.keys_offs.push(off);
                     }
                     // Increment cursors in either case; the keys are merged.
                     self.key_cursor1 += 1;
@@ -364,8 +377,8 @@ mod val_batch {
                         // Extend stash by updates, with logical compaction applied.
                         self.stash_updates_for_val(source1, lower1);
                         if let Some(off) = self.consolidate_updates() {
-                            self.result.vals_offs.copy(off);
-                            self.result.vals.copy(source1.vals.index(lower1));
+                            self.result.vals_offs.push(off);
+                            self.result.vals.push(source1.vals.index(lower1));
                         }
                         lower1 += 1;
                     },
@@ -373,8 +386,8 @@ mod val_batch {
                         self.stash_updates_for_val(source1, lower1);
                         self.stash_updates_for_val(source2, lower2);
                         if let Some(off) = self.consolidate_updates() {
-                            self.result.vals_offs.copy(off);
-                            self.result.vals.copy(source1.vals.index(lower1));
+                            self.result.vals_offs.push(off);
+                            self.result.vals.push(source1.vals.index(lower1));
                         }
                         lower1 += 1;
                         lower2 += 1;
@@ -383,8 +396,8 @@ mod val_batch {
                         // Extend stash by updates, with logical compaction applied.
                         self.stash_updates_for_val(source2, lower2);
                         if let Some(off) = self.consolidate_updates() {
-                            self.result.vals_offs.copy(off);
-                            self.result.vals.copy(source2.vals.index(lower2));
+                            self.result.vals_offs.push(off);
+                            self.result.vals.push(source2.vals.index(lower2));
                         }
                         lower2 += 1;
                     },
@@ -394,16 +407,16 @@ mod val_batch {
             while lower1 < upper1 {
                 self.stash_updates_for_val(source1, lower1);
                 if let Some(off) = self.consolidate_updates() {
-                    self.result.vals_offs.copy(off);
-                    self.result.vals.copy(source1.vals.index(lower1));
+                    self.result.vals_offs.push(off);
+                    self.result.vals.push(source1.vals.index(lower1));
                 }
                 lower1 += 1;
             }
             while lower2 < upper2 {
                 self.stash_updates_for_val(source2, lower2);
                 if let Some(off) = self.consolidate_updates() {
-                    self.result.vals_offs.copy(off);
-                    self.result.vals.copy(source2.vals.index(lower2));
+                    self.result.vals_offs.push(off);
+                    self.result.vals.push(source2.vals.index(lower2));
                 }
                 lower2 += 1;
             }
@@ -577,7 +590,7 @@ mod val_batch {
     impl<L, CI> Builder for OrdValBuilder<L, CI>
     where
         L: Layout,
-        CI: for<'a> BuilderInput<L, Time=<L::Target as Update>::Time, Diff=<L::Target as Update>::Diff>,
+        CI: for<'a> BuilderInput<L::KeyContainer, L::ValContainer, Time=<L::Target as Update>::Time, Diff=<L::Target as Update>::Diff>,
         for<'a> L::KeyContainer: PushInto<CI::Key<'a>>,
         for<'a> L::ValContainer: PushInto<CI::Val<'a>>,
         for<'a> <L::TimeContainer as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = <L::Target as Update>::Time>,
@@ -616,16 +629,16 @@ mod val_batch {
                         self.push_update(time, diff);
                     } else {
                         // New value; complete representation of prior value.
-                        self.result.vals_offs.copy(self.result.times.len());
+                        self.result.vals_offs.push(self.result.times.len());
                         if self.singleton.take().is_some() { self.singletons += 1; }
                         self.push_update(time, diff);
                         self.result.vals.push(val);
                     }
                 } else {
                     // New key; complete representation of prior key.
-                    self.result.vals_offs.copy(self.result.times.len());
+                    self.result.vals_offs.push(self.result.times.len());
                     if self.singleton.take().is_some() { self.singletons += 1; }
-                    self.result.keys_offs.copy(self.result.vals.len());
+                    self.result.keys_offs.push(self.result.vals.len());
                     self.push_update(time, diff);
                     self.result.vals.push(val);
                     self.result.keys.push(key);
@@ -636,10 +649,10 @@ mod val_batch {
         #[inline(never)]
         fn done(mut self, lower: Antichain<Self::Time>, upper: Antichain<Self::Time>, since: Antichain<Self::Time>) -> OrdValBatch<L> {
             // Record the final offsets
-            self.result.vals_offs.copy(self.result.times.len());
+            self.result.vals_offs.push(self.result.times.len());
             // Remove any pending singleton, and if it was set increment our count.
             if self.singleton.take().is_some() { self.singletons += 1; }
-            self.result.keys_offs.copy(self.result.vals.len());
+            self.result.keys_offs.push(self.result.vals.len());
             OrdValBatch {
                 updates: self.result.times.len() + self.singletons,
                 storage: self.result,
@@ -795,7 +808,7 @@ mod key_batch {
             };
 
             let keys_offs: &mut L::OffsetContainer = &mut storage.keys_offs;
-            keys_offs.copy(0);
+            keys_offs.push(0);
 
             OrdKeyMerger {
                 key_cursor1: 0,
@@ -855,8 +868,8 @@ mod key_batch {
         fn copy_key(&mut self, source: &OrdKeyStorage<L>, cursor: usize) {
             self.stash_updates_for_key(source, cursor);
             if let Some(off) = self.consolidate_updates() {
-                self.result.keys_offs.copy(off);
-                self.result.keys.copy(source.keys.index(cursor));
+                self.result.keys_offs.push(off);
+                self.result.keys.push(source.keys.index(cursor));
             }
         }
         /// Merge the next key in each of `source1` and `source2` into `self`, updating the appropriate cursors.
@@ -875,8 +888,8 @@ mod key_batch {
                     self.stash_updates_for_key(source1, self.key_cursor1);
                     self.stash_updates_for_key(source2, self.key_cursor2);
                     if let Some(off) = self.consolidate_updates() {
-                        self.result.keys_offs.copy(off);
-                        self.result.keys.copy(source1.keys.index(self.key_cursor1));
+                        self.result.keys_offs.push(off);
+                        self.result.keys.push(source1.keys.index(self.key_cursor1));
                     }
                     // Increment cursors in either case; the keys are merged.
                     self.key_cursor1 += 1;
@@ -1044,7 +1057,7 @@ mod key_batch {
     impl<L: Layout, CI> Builder for OrdKeyBuilder<L, CI>
     where
         L: Layout,
-        CI: for<'a> BuilderInput<L, Time=<L::Target as Update>::Time, Diff=<L::Target as Update>::Diff>,
+        CI: for<'a> BuilderInput<L::KeyContainer, L::ValContainer, Time=<L::Target as Update>::Time, Diff=<L::Target as Update>::Diff>,
         for<'a> L::KeyContainer: PushInto<CI::Key<'a>>,
         for<'a> <L::TimeContainer as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = <L::Target as Update>::Time>,
         for<'a> <L::DiffContainer as BatchContainer>::ReadItem<'a> : IntoOwned<'a, Owned = <L::Target as Update>::Diff>,
@@ -1078,7 +1091,7 @@ mod key_batch {
                     self.push_update(time, diff);
                 } else {
                     // New key; complete representation of prior key.
-                    self.result.keys_offs.copy(self.result.times.len());
+                    self.result.keys_offs.push(self.result.times.len());
                     // Remove any pending singleton, and if it was set increment our count.
                     if self.singleton.take().is_some() { self.singletons += 1; }
                     self.push_update(time, diff);
@@ -1090,7 +1103,7 @@ mod key_batch {
         #[inline(never)]
         fn done(mut self, lower: Antichain<Self::Time>, upper: Antichain<Self::Time>, since: Antichain<Self::Time>) -> OrdKeyBatch<L> {
             // Record the final offsets
-            self.result.keys_offs.copy(self.result.times.len());
+            self.result.keys_offs.push(self.result.times.len());
             // Remove any pending singleton, and if it was set increment our count.
             if self.singleton.take().is_some() { self.singletons += 1; }
             OrdKeyBatch {
